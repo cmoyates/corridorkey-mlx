@@ -1,5 +1,8 @@
-"""Hiera backbone — MLX port (not yet implemented).
+"""Hiera backbone — thin re-export.
 
-Original: timm Hiera with features_only=True.
-Emits 4 multiscale feature maps.
+Import from :mod:`corridorkey_mlx.model.hiera` for the full implementation.
 """
+
+from corridorkey_mlx.model.hiera import HieraBackbone
+
+__all__ = ["HieraBackbone"]
