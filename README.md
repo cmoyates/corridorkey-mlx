@@ -37,23 +37,55 @@ RGB image + coarse alpha hint (4ch)
 
 | Phase | Scope | Status |
 |-------|-------|--------|
-| 1 | PyTorch reference harness + fixture dump | **In progress** |
-| 2 | MLX decoder/refiner blocks + parity tests | Not started |
-| 3 | Checkpoint conversion (PyTorch → MLX) | Not started |
-| 4 | Full inference pipeline | Not started |
-| 5 | Optimization + benchmarking | Not started |
+| 1 | PyTorch reference harness + fixture dump | Done |
+| 2 | MLX decoder/refiner blocks + parity tests | Done |
+| 3 | Checkpoint conversion (PyTorch → MLX) | Done |
+| 4 | Hiera backbone port | Done |
+| 5 | Full model assembly + e2e parity | Done |
 
 See `prompts/` for detailed phase instructions.
 
-## Setup
+## Usage
+
+### Setup
 
 ```bash
 uv sync --group dev
 ```
 
-For PyTorch reference work:
+### Convert weights
+
+Convert the PyTorch checkpoint to MLX safetensors (one-time):
+
 ```bash
-uv sync --group reference
+uv run python scripts/convert_weights.py \
+    --checkpoint checkpoints/CorridorKey_v1.0.pth \
+    --output checkpoints/corridorkey_mlx.safetensors
+```
+
+### Single-image inference
+
+```bash
+uv run python scripts/infer.py \
+    --image input.png \
+    --hint alpha_hint.png \
+    --output-dir output/
+```
+
+Outputs `output/alpha.png` (alpha matte) and `output/foreground.png` (foreground).
+
+Options:
+- `--checkpoint PATH` — MLX safetensors file (default: `checkpoints/corridorkey_mlx.safetensors`)
+- `--img-size N` — model input resolution (default: 512)
+- `--output-dir DIR` — output directory (default: `output/`)
+
+### Python API
+
+```python
+from corridorkey_mlx.inference.pipeline import load_model, infer_and_save
+
+model = load_model("checkpoints/corridorkey_mlx.safetensors", img_size=512)
+results = infer_and_save(model, "input.png", "alpha_hint.png", "output/")
 ```
 
 ## Development
@@ -63,6 +95,11 @@ uv run pytest              # tests
 uv run ruff check .        # lint
 uv run ruff format .       # format
 uv run mypy src/           # type check
+```
+
+For PyTorch reference work:
+```bash
+uv sync --group reference
 ```
 
 ## Reference Fixtures
@@ -96,6 +133,20 @@ uv run --group reference python scripts/dump_pytorch_reference.py \
 | `alpha_final` | (1, 1, 512, 512) | Final alpha prediction |
 | `fg_final` | (1, 3, 512, 512) | Final FG prediction |
 
+## Parity Results
+
+End-to-end parity vs PyTorch reference (512×512, float32):
+
+| Tensor | Max Abs Error | Mean Abs Error |
+|--------|--------------|----------------|
+| alpha_logits | 8.8e-05 | 1.6e-05 |
+| fg_logits | 1.5e-04 | 7.2e-06 |
+| alpha_coarse | 9.7e-06 | 1.1e-06 |
+| fg_coarse | 6.7e-06 | 1.1e-06 |
+| delta_logits | 1.1e-04 | 4.3e-06 |
+| alpha_final | 2.6e-05 | 8.7e-08 |
+| fg_final | 9.5e-06 | 1.1e-06 |
+
 ## Current Status
 
-Phase 1 in progress — reference harness and fixture dump implemented.
+Phases 1–5 complete. Full model assembly with end-to-end parity verified.
