@@ -17,3 +17,6 @@ reference/fixtures/*.npz
 
 # Sample images
 samples/
+
+# Inference outputs
+output/
