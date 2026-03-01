@@ -27,6 +27,10 @@ def _compute_tile_coords(
 
     Tiles overlap by `overlap` pixels. Last tile is clamped to image boundary.
     """
+    if overlap >= tile_size:
+        msg = f"overlap ({overlap}) must be less than tile_size ({tile_size})"
+        raise ValueError(msg)
+
     if image_size <= tile_size:
         return [(0, image_size)]
 

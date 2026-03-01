@@ -32,6 +32,12 @@ def model() -> GreenFormer:
 
 
 class TestTileCoords:
+    def test_overlap_gte_tile_size_raises(self) -> None:
+        with pytest.raises(ValueError, match="overlap.*must be less than tile_size"):
+            _compute_tile_coords(512, 256, 256)
+        with pytest.raises(ValueError, match="overlap.*must be less than tile_size"):
+            _compute_tile_coords(512, 256, 300)
+
     def test_single_tile(self) -> None:
         coords = _compute_tile_coords(200, 256, 32)
         assert coords == [(0, 200)]
