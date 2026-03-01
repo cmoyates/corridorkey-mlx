@@ -34,6 +34,8 @@ packages = ["src/corridorkey_mlx"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["slow: heavy tests (2048 inference, etc.) — run with -m slow"]
+addopts = "-m 'not slow'"
 
 [tool.ruff]
 target-version = "py311"

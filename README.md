@@ -247,6 +247,29 @@ uv run python scripts/smoke_engine.py \
     --img-size 512
 ```
 
+### 2048 smoke test
+
+Validates full end-to-end inference at CorridorKey's native 2048 resolution.
+Uses `samples/sample.png` + `samples/hint.png` by default; falls back to
+synthetic inputs if samples are unavailable.
+
+```bash
+uv run python scripts/smoke_2048.py
+```
+
+With real images:
+```bash
+uv run python scripts/smoke_2048.py --image shot.png --hint hint.png
+```
+
+Reports timing, peak memory, output shapes, and value-range diagnostics.
+This is an execution check, not a 2048 parity validation.
+
+To run the slow pytest version:
+```bash
+uv run pytest -m slow
+```
+
 ### Standalone scripts vs engine usage
 
 | | Standalone (`scripts/infer.py`) | Engine (`CorridorKeyMLXEngine`) |
