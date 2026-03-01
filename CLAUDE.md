@@ -31,6 +31,10 @@ MLX inference port of CorridorKey for Apple Silicon.
 - Inference only — no training code
 - Preserve PyTorch behavior before optimizing
 
+## Shell
+
+- Do not use `cd` — zoxide overrides it and breaks non-interactive shells. Use absolute paths instead.
+
 ## Commands
 
 ```bash
