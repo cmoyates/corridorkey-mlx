@@ -158,13 +158,13 @@ class CNNRefinerModule(nn.Module):
 class GreenFormer(nn.Module):
     """Top-level CorridorKey model: Hiera encoder + dual decoder heads + CNN refiner."""
 
-    def __init__(self) -> None:
+    def __init__(self, img_size: int = IMG_SIZE) -> None:
         super().__init__()
         self.encoder = timm.create_model(
             HIERA_MODEL_NAME,
             pretrained=False,
             features_only=True,
-            img_size=IMG_SIZE,
+            img_size=img_size,
         )
         self._patch_first_conv()
 

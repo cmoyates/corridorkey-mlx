@@ -63,7 +63,7 @@ def main() -> None:
     torch.set_grad_enabled(False)
 
     print(f"Building model (img_size={args.img_size})...")
-    model = GreenFormer()
+    model = GreenFormer(img_size=args.img_size)
     model.eval()
 
     print(f"Loading checkpoint: {args.checkpoint}")

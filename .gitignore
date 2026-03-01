@@ -20,3 +20,6 @@ samples/
 
 # Inference outputs
 output/
+
+# OS files
+.DS_Store
