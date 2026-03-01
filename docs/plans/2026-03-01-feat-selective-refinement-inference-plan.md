@@ -225,10 +225,10 @@ Warnings: none
 
 #### Phase 4: Script + benchmark + comparison
 
-- CLI script with all knobs exposed
-- Baseline vs selective timing
-- Quality diff metrics + artifact saves
-- Report generation
+- [x] CLI script with all knobs exposed
+- [x] Baseline vs selective timing
+- [x] Quality diff metrics + artifact saves
+- [x] Report generation
 
 **Files:** `scripts/experiment_selective_refine.py`
 
