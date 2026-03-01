@@ -9,10 +9,16 @@ Reference: https://arxiv.org/abs/2306.00989
 
 from __future__ import annotations
 
+import math
 from functools import reduce
+from typing import TYPE_CHECKING
 
 import mlx.core as mx
 import mlx.nn as nn
+from safetensors import safe_open
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # ── hiera_base_plus_224 constants ──────────────────────────────────────
 EMBED_DIM = 112
@@ -29,6 +35,8 @@ IN_CHANS = 4  # RGB + alpha hint
 MLP_RATIO = 4.0
 DIM_MUL = 2.0
 HEAD_MUL = 2.0
+ENCODER_KEY_PREFIX = "encoder.model."
+TRAIN_IMG_SIZE = 2048  # checkpoint was trained at this resolution
 
 
 # ── Helpers ────────────────────────────────────────────────────────────
@@ -159,6 +167,36 @@ def reroll(
 
     # No mask -> return [B, H, W, C]
     return undo_windowing(x, size, cur_mu_shape)
+
+
+def _interpolate_pos_embed(
+    ckpt_embed: mx.array,
+    target_tokens: int,
+) -> mx.array:
+    """Bicubic interpolation of pos_embed from checkpoint to model resolution.
+
+    Args:
+        ckpt_embed: (1, N_ckpt, C) from checkpoint
+        target_tokens: target token count N_model = H_model * W_model
+
+    Returns:
+        (1, N_model, C)
+    """
+    ckpt_n = ckpt_embed.shape[1]
+    if ckpt_n == target_tokens:
+        return ckpt_embed
+
+    embed_dim = ckpt_embed.shape[2]
+    ckpt_side = int(math.sqrt(ckpt_n))
+    model_side = int(math.sqrt(target_tokens))
+
+    # (1, N, C) -> (1, H, W, C) NHWC for MLX upsample
+    embed = ckpt_embed.reshape(1, ckpt_side, ckpt_side, embed_dim)
+    scale = model_side / ckpt_side
+    resizer = nn.Upsample(scale_factor=(scale, scale), mode="cubic", align_corners=False)
+    embed = resizer(embed)
+    # Back to (1, N, C)
+    return embed.reshape(1, target_tokens, embed_dim)
 
 
 # ── Modules ────────────────────────────────────────────────────────────
@@ -382,6 +420,34 @@ class HieraBackbone(nn.Module):
             )
             self.blocks.append(block)
             embed_dim = dim_out
+
+    def load_checkpoint(self, path: str | Path) -> None:
+        """Load weights from converted safetensors checkpoint.
+
+        Strips ``encoder.model.`` prefix and bicubic-interpolates pos_embed
+        from training resolution to model resolution.
+        """
+        target_tokens = _prod(self.tokens_spatial_shape)
+        weight_pairs: list[tuple[str, mx.array]] = []
+
+        with safe_open(str(path), framework="numpy") as f:
+            for full_key in f.keys():  # noqa: SIM118 — safe_open isn't iterable
+                if not full_key.startswith(ENCODER_KEY_PREFIX):
+                    continue
+                mlx_key = full_key[len(ENCODER_KEY_PREFIX) :]
+                tensor = mx.array(f.get_tensor(full_key))
+
+                if mlx_key == "pos_embed":
+                    tensor = _interpolate_pos_embed(tensor, target_tokens)
+                    # materialize interpolated embedding
+                    mx.eval(tensor)  # noqa: S307 — mx.eval, not Python eval
+
+                weight_pairs.append((mlx_key, tensor))
+
+        self.load_weights(weight_pairs)
+        self.eval()
+        # materialize all parameters
+        mx.eval(self.parameters())  # noqa: S307 — mx.eval, not Python eval
 
     def __call__(self, x: mx.array) -> list[mx.array]:
         """Forward pass.
