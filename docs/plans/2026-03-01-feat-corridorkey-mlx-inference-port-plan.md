@@ -109,10 +109,10 @@ RGB + coarse alpha hint (4ch)
 
 **Components to implement:**
 
-- [ ] `MLP` -- feedforward block
-- [ ] `DecoderHead` -- consumes backbone features, produces coarse predictions
-- [ ] `RefinerBlock` -- single refiner stage
-- [ ] `CNNRefinerModule` -- full refiner consuming 7ch input
+- [x] `MLP` -- feedforward block
+- [x] `DecoderHead` -- consumes backbone features, produces coarse predictions
+- [x] `RefinerBlock` -- single refiner stage
+- [x] `CNNRefinerModule` -- full refiner consuming 7ch input
 
 **Files touched:**
 

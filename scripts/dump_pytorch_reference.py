@@ -333,6 +333,29 @@ def dump_fixtures(outputs: dict[str, torch.Tensor | list[torch.Tensor]], output_
     console.print(f"\n[green]Saved fixtures to {out_path}[/green]")
 
 
+WEIGHTS_FILENAME = "golden_weights.npz"
+
+
+def dump_weights(model: GreenFormer, output_dir: Path) -> None:
+    """Save decoder and refiner weights as numpy arrays for Phase 2 parity tests.
+
+    Keys are the PyTorch state_dict keys (e.g. 'alpha_decoder.linear_c1.proj.weight').
+    Conv weights remain in PyTorch format (O,I,H,W) — tests handle conversion.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    arrays: dict[str, np.ndarray] = {}
+
+    # Extract decoder and refiner state dicts
+    prefixes = ("alpha_decoder.", "fg_decoder.", "refiner.")
+    for key, param in model.state_dict().items():
+        if any(key.startswith(p) for p in prefixes):
+            arrays[key] = param.cpu().numpy()
+
+    out_path = output_dir / WEIGHTS_FILENAME
+    np.savez(out_path, **arrays)
+    console.print(f"[green]Saved {len(arrays)} weight tensors to {out_path}[/green]")
+
+
 def print_shape_report(outputs: dict[str, torch.Tensor | list[torch.Tensor]]) -> None:
     """Print a rich table of tensor names, shapes, and dtypes."""
     table = Table(title="Reference Fixture Shapes")
@@ -419,6 +442,7 @@ def main() -> None:
 
     print_shape_report(outputs)
     dump_fixtures(outputs, args.output_dir)
+    dump_weights(model, args.output_dir)
 
 
 if __name__ == "__main__":
