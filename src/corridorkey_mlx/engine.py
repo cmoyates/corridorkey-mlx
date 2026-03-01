@@ -17,7 +17,6 @@ from PIL import Image
 
 from corridorkey_mlx.inference.pipeline import load_model
 from corridorkey_mlx.io.image import (
-    normalize_rgb,
     postprocess_alpha,
     postprocess_foreground,
     preprocess,
@@ -141,7 +140,7 @@ class CorridorKeyMLXEngine:
             mask_f32 = np.asarray(mask_pil, dtype=np.float32)[:, :, np.newaxis] / 255.0
 
         # -- preprocess (ImageNet norm + concat) -> (1, H, W, 4) NHWC --
-        x = preprocess(normalize_rgb(rgb_f32), mask_f32)
+        x = preprocess(rgb_f32, mask_f32)
 
         # -- forward --
         outputs = self._model(x)
