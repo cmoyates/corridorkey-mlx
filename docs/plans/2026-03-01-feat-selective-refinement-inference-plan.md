@@ -234,9 +234,9 @@ Warnings: none
 
 #### Phase 5: Tests + docs
 
-- Add narrow unit tests for mask/tile/blend
-- Update README with experimental section
-- Mark all new code as experimental
+- [x] Add narrow unit tests for mask/tile/blend (20 new tests: kernel, resize, build_input, edge cases, warnings)
+- [x] Update README with experimental section
+- [x] Mark all new code as experimental
 
 **Files:** `tests/test_selective_refine.py`, `README.md`
 

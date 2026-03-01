@@ -290,6 +290,62 @@ uv run pytest -m slow
 
 Requires Python >=3.11. Compatible with the main CorridorKey repo's 3.11 target.
 
+## Experimental: Selective Refinement
+
+> **Warning:** This feature is experimental and not part of the stable API.
+
+Selective refinement runs a cheap coarse pass at low resolution, identifies
+uncertain regions (transition bands, edges), then re-infers only those tiles
+at full resolution. Reduces compute on trivial foreground/background regions.
+
+### Python API
+
+```python
+from corridorkey_mlx.inference.pipeline import load_model
+from corridorkey_mlx.inference.selective_refine import (
+    SelectiveRefineConfig,
+    selective_refine,
+)
+
+model = load_model("checkpoints/corridorkey_mlx.safetensors", img_size=512)
+
+config = SelectiveRefineConfig(
+    coarse_size=512,      # full-frame coarse pass resolution
+    tile_size=512,        # tile crop size (must match img_size)
+    tile_overlap=64,      # overlap between tiles
+    dilation_radius=32,   # dilate uncertain regions before tiling
+)
+
+result = selective_refine(model, rgb_uint8, hint_uint8, config)
+# result.alpha_final    — (H, W) uint8
+# result.fg_final       — (H, W, 3) uint8
+# result.uncertainty_mask — (H, W) bool
+# result.tile_coords    — selected tile rects
+# result.stats          — timing breakdown
+```
+
+### Experiment script
+
+Compare selective refinement against full-frame baseline:
+
+```bash
+uv run python scripts/experiment_selective_refine.py \
+    --image samples/sample.png \
+    --hint samples/hint.png \
+    --checkpoint checkpoints/corridorkey_mlx.safetensors \
+    --output-dir output/selective_refine/
+```
+
+Produces alpha/fg outputs, uncertainty mask visualization, tile overlay,
+diff heatmap, and a timing/quality report.
+
+### Caveats
+
+- Single model instance at `tile_size` for both coarse and tile passes
+- Coarse pass at 512 may miss fine detail vs native resolution
+- Worst case (all tiles selected) ≈ full-frame tiled inference speed
+- Not integrated into `CorridorKeyMLXEngine` — standalone API only
+
 ## Current Status
 
 Phases 1–6 complete. Full model assembly with end-to-end parity verified.
