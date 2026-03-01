@@ -3,15 +3,13 @@ name = "corridorkey-mlx"
 version = "0.1.0"
 description = "MLX inference port of CorridorKey for Apple Silicon"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 dependencies = [
     "mlx>=0.31.0",
-    "numpy>=2.4.2",
-    "pillow>=12.1.1",
-    "pydantic>=2.12.5",
-    "rich>=14.3.3",
-    "safetensors>=0.7.0",
-    "typer>=0.24.1",
+    "numpy>=2.0.0",
+    "pillow>=10.0.0",
+    "rich>=13.0.0",
+    "safetensors>=0.4.0",
 ]
 
 [dependency-groups]
@@ -38,7 +36,7 @@ packages = ["src/corridorkey_mlx"]
 testpaths = ["tests"]
 
 [tool.ruff]
-target-version = "py312"
+target-version = "py311"
 line-length = 99
 src = ["src"]
 
@@ -46,6 +44,6 @@ src = ["src"]
 select = ["E", "F", "I", "UP", "B", "SIM", "TCH"]
 
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.11"
 strict = true
 mypy_path = "src"
