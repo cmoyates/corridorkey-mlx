@@ -1,0 +1,51 @@
+[project]
+name = "corridorkey-mlx"
+version = "0.1.0"
+description = "MLX inference port of CorridorKey for Apple Silicon"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "mlx>=0.31.0",
+    "numpy>=2.4.2",
+    "pillow>=12.1.1",
+    "pydantic>=2.12.5",
+    "rich>=14.3.3",
+    "safetensors>=0.7.0",
+    "typer>=0.24.1",
+]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.19.1",
+    "pytest>=9.0.2",
+    "pytest-xdist>=3.8.0",
+    "ruff>=0.15.4",
+]
+reference = [
+    "timm>=1.0.25",
+    "torch>=2.10.0",
+    "torchvision>=0.25.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/corridorkey_mlx"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 99
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "TCH"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+mypy_path = "src"
