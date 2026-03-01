@@ -12,17 +12,11 @@ import argparse
 import time
 from pathlib import Path
 
-import mlx.core as mx
-
-from corridorkey_mlx.inference.pipeline import DEFAULT_CHECKPOINT, DEFAULT_IMG_SIZE, load_model
-from corridorkey_mlx.io.image import (
-    load_alpha_hint,
-    load_image,
-    postprocess_alpha,
-    postprocess_foreground,
-    preprocess,
-    save_alpha,
-    save_foreground,
+from corridorkey_mlx.inference.pipeline import (
+    DEFAULT_CHECKPOINT,
+    DEFAULT_IMG_SIZE,
+    infer_and_save,
+    load_model,
 )
 
 
@@ -56,38 +50,14 @@ def main() -> None:
     model = load_model(args.checkpoint, args.img_size)
     print(f"  Model loaded in {time.perf_counter() - t0:.2f}s")
 
-    print(f"Preprocessing {args.image}...")
-    rgb = load_image(args.image)
-    alpha_hint = load_alpha_hint(args.hint)
-    x = preprocess(rgb, alpha_hint)
-    # materialize input — mx.eval is MLX lazy graph eval, not Python eval
-    mx.eval(x)  # noqa: S307
-
-    print("Running inference...")
+    print(f"Running inference on {args.image}...")
     t0 = time.perf_counter()
-    outputs = model(x)
-    # materialize outputs — mx.eval is MLX lazy graph eval, not Python eval
-    mx.eval(outputs)  # noqa: S307
-    print(f"  Inference in {time.perf_counter() - t0:.2f}s")
+    results = infer_and_save(model, args.image, args.hint, args.output_dir)
+    print(f"  Inference + save in {time.perf_counter() - t0:.2f}s")
 
-    # Print summary
-    print("\nOutput tensors:")
-    for key, arr in outputs.items():
-        print(
-            f"  {key:<20s} shape={arr.shape} "
-            f"min={float(mx.min(arr)):.4f} max={float(mx.max(arr)):.4f}"
-        )
-
-    # Save results
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    alpha_arr = postprocess_alpha(outputs["alpha_final"])
-    fg_arr = postprocess_foreground(outputs["fg_final"])
-
-    alpha_path = args.output_dir / "alpha.png"
-    fg_path = args.output_dir / "foreground.png"
-    save_alpha(alpha_arr, alpha_path)
-    save_foreground(fg_arr, fg_path)
-    print(f"\nSaved: {alpha_path}, {fg_path}")
+    print(f"\nSaved: {args.output_dir / 'alpha.png'}, {args.output_dir / 'foreground.png'}")
+    print(f"  Alpha shape: {results['alpha'].shape}")
+    print(f"  Foreground shape: {results['foreground'].shape}")
 
 
 if __name__ == "__main__":

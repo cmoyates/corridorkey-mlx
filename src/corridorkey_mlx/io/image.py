@@ -19,15 +19,29 @@ IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
 
-def load_image(path: str | Path) -> np.ndarray:
-    """Load image as RGB float32 array in [0, 1] range, shape (H, W, 3)."""
+def load_image(path: str | Path, img_size: int | None = None) -> np.ndarray:
+    """Load image as RGB float32 array in [0, 1] range, shape (H, W, 3).
+
+    Args:
+        path: Path to image file.
+        img_size: If provided, resize to (img_size, img_size) using bicubic interpolation.
+    """
     img = Image.open(path).convert("RGB")
+    if img_size is not None:
+        img = img.resize((img_size, img_size), Image.BICUBIC)
     return np.asarray(img, dtype=np.float32) / 255.0
 
 
-def load_alpha_hint(path: str | Path) -> np.ndarray:
-    """Load alpha hint as grayscale float32 array in [0, 1], shape (H, W, 1)."""
+def load_alpha_hint(path: str | Path, img_size: int | None = None) -> np.ndarray:
+    """Load alpha hint as grayscale float32 array in [0, 1], shape (H, W, 1).
+
+    Args:
+        path: Path to alpha hint image file.
+        img_size: If provided, resize to (img_size, img_size) using bicubic interpolation.
+    """
     img = Image.open(path).convert("L")
+    if img_size is not None:
+        img = img.resize((img_size, img_size), Image.BICUBIC)
     return np.asarray(img, dtype=np.float32)[:, :, np.newaxis] / 255.0
 
 

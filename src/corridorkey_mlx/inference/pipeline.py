@@ -53,11 +53,10 @@ def infer(
     Returns:
         Model output dict with all intermediate and final tensors.
     """
-    rgb = load_image(image_path)
-    alpha_hint = load_alpha_hint(alpha_hint_path)
+    img_size = model.backbone.img_size
+    rgb = load_image(image_path, img_size=img_size)
+    alpha_hint = load_alpha_hint(alpha_hint_path, img_size=img_size)
     x = preprocess(rgb, alpha_hint)
-    # materialize input
-    mx.eval(x)  # noqa: S307
     outputs = model(x)
     # materialize all outputs
     mx.eval(outputs)  # noqa: S307
