@@ -1,20 +1,24 @@
-"""Tests for experimental selective refinement — Phase 1.
+"""Tests for experimental selective refinement.
 
-Covers uncertainty mask generation, binary dilation, and tile selection.
-All tests use deterministic synthetic data and require no checkpoint.
+Phase 1: uncertainty mask, binary dilation, tile selection (synthetic data).
+Phase 2: two-pass pipeline with real model (random weights, small resolution).
 """
 
 from __future__ import annotations
 
+import mlx.core as mx
 import numpy as np
 import pytest
 
 from corridorkey_mlx.inference.selective_refine import (
     SelectiveRefineConfig,
+    SelectiveRefineResult,
     _binary_dilation,
     compute_uncertainty_mask,
     select_tiles,
+    selective_refine,
 )
+from corridorkey_mlx.model.corridorkey import GreenFormer
 
 # ---------------------------------------------------------------------------
 # Binary dilation
@@ -207,3 +211,153 @@ class TestSelectiveRefineConfig:
         assert config.dilation_radius == 32
         assert config.min_tile_coverage == pytest.approx(0.05)
         assert config.compile is True
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: Two-pass pipeline
+# ---------------------------------------------------------------------------
+
+SMALL_SIZE = 256
+
+
+@pytest.fixture()
+def model() -> GreenFormer:
+    """Small model with random weights for pipeline tests."""
+    m = GreenFormer(img_size=SMALL_SIZE)
+    m.eval()
+    # NOTE: mx.eval materializes lazy MLX arrays, not Python's eval()
+    mx.eval(m.parameters())  # noqa: S307
+    return m
+
+
+class TestSelectiveRefinePipeline:
+    def test_returns_correct_type(self, model: GreenFormer) -> None:
+        """Pipeline returns SelectiveRefineResult."""
+        rng = np.random.default_rng(42)
+        image = rng.integers(0, 256, (512, 512, 3), dtype=np.uint8)
+        hint = rng.integers(0, 256, (512, 512), dtype=np.uint8)
+        config = SelectiveRefineConfig(
+            coarse_size=SMALL_SIZE,
+            tile_size=SMALL_SIZE,
+            tile_overlap=32,
+            dilation_radius=4,
+        )
+
+        result = selective_refine(model, image, hint, config)
+        assert isinstance(result, SelectiveRefineResult)
+
+    def test_output_shapes_match_input(self, model: GreenFormer) -> None:
+        """Output arrays match input spatial dimensions."""
+        rng = np.random.default_rng(42)
+        image = rng.integers(0, 256, (400, 600, 3), dtype=np.uint8)
+        hint = rng.integers(0, 256, (400, 600), dtype=np.uint8)
+        config = SelectiveRefineConfig(
+            coarse_size=SMALL_SIZE,
+            tile_size=SMALL_SIZE,
+            tile_overlap=32,
+            dilation_radius=4,
+        )
+
+        result = selective_refine(model, image, hint, config)
+
+        assert result.alpha_final.shape == (400, 600)
+        assert result.fg_final.shape == (400, 600, 3)
+        assert result.coarse_alpha.shape == (400, 600)
+        assert result.uncertainty_mask.shape == (400, 600)
+
+    def test_output_dtypes(self, model: GreenFormer) -> None:
+        """Output arrays have expected dtypes."""
+        rng = np.random.default_rng(42)
+        image = rng.integers(0, 256, (512, 512, 3), dtype=np.uint8)
+        hint = rng.integers(0, 256, (512, 512), dtype=np.uint8)
+        config = SelectiveRefineConfig(
+            coarse_size=SMALL_SIZE,
+            tile_size=SMALL_SIZE,
+            tile_overlap=32,
+            dilation_radius=4,
+        )
+
+        result = selective_refine(model, image, hint, config)
+
+        assert result.alpha_final.dtype == np.uint8
+        assert result.fg_final.dtype == np.uint8
+        assert result.coarse_alpha.dtype == np.uint8
+        assert result.uncertainty_mask.dtype == bool
+
+    def test_stats_populated(self, model: GreenFormer) -> None:
+        """Stats dict contains expected timing keys."""
+        rng = np.random.default_rng(42)
+        image = rng.integers(0, 256, (512, 512, 3), dtype=np.uint8)
+        hint = rng.integers(0, 256, (512, 512), dtype=np.uint8)
+        config = SelectiveRefineConfig(
+            coarse_size=SMALL_SIZE,
+            tile_size=SMALL_SIZE,
+            tile_overlap=32,
+            dilation_radius=4,
+        )
+
+        result = selective_refine(model, image, hint, config)
+
+        assert "coarse_ms" in result.stats
+        assert "tile_refine_ms" in result.stats
+        assert "total_ms" in result.stats
+        assert "tiles_selected" in result.stats
+        assert "tiles_total" in result.stats
+        assert "mask_coverage" in result.stats
+        assert result.stats["coarse_ms"] > 0
+
+    def test_zero_tiles_valid_result(self, model: GreenFormer) -> None:
+        """Pipeline with no uncertain regions still returns valid result."""
+        # All-white image + all-white hint
+        image = np.full((SMALL_SIZE, SMALL_SIZE, 3), 255, dtype=np.uint8)
+        hint = np.full((SMALL_SIZE, SMALL_SIZE), 255, dtype=np.uint8)
+        config = SelectiveRefineConfig(
+            coarse_size=SMALL_SIZE,
+            tile_size=SMALL_SIZE,
+            tile_overlap=32,
+            dilation_radius=2,
+        )
+
+        result = selective_refine(model, image, hint, config)
+
+        # With random weights we can't guarantee zero tiles, but result is valid
+        assert result.alpha_final.shape == (SMALL_SIZE, SMALL_SIZE)
+        assert result.stats["tiles_selected"] >= 0
+
+    def test_hint_3d_accepted(self, model: GreenFormer) -> None:
+        """Alpha hint with shape (H, W, 1) should work."""
+        rng = np.random.default_rng(42)
+        image = rng.integers(0, 256, (512, 512, 3), dtype=np.uint8)
+        hint = rng.integers(0, 256, (512, 512, 1), dtype=np.uint8)
+        config = SelectiveRefineConfig(
+            coarse_size=SMALL_SIZE,
+            tile_size=SMALL_SIZE,
+            tile_overlap=32,
+            dilation_radius=4,
+        )
+
+        result = selective_refine(model, image, hint, config)
+        assert result.alpha_final.shape == (512, 512)
+
+    def test_tile_results_stored(self, model: GreenFormer) -> None:
+        """Per-tile results should be stored in stats for phase 3."""
+        rng = np.random.default_rng(42)
+        image = rng.integers(0, 256, (512, 512, 3), dtype=np.uint8)
+        hint = rng.integers(0, 256, (512, 512), dtype=np.uint8)
+        config = SelectiveRefineConfig(
+            coarse_size=SMALL_SIZE,
+            tile_size=SMALL_SIZE,
+            tile_overlap=32,
+            dilation_radius=4,
+        )
+
+        result = selective_refine(model, image, hint, config)
+
+        tile_results = result.stats.get("_tile_results")
+        assert isinstance(tile_results, list)
+        assert len(tile_results) == result.stats["tiles_selected"]
+        for tr in tile_results:
+            assert "alpha" in tr
+            assert "fg" in tr
+            assert tr["alpha"].shape == (SMALL_SIZE, SMALL_SIZE)
+            assert tr["fg"].shape == (SMALL_SIZE, SMALL_SIZE, 3)

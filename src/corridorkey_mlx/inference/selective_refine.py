@@ -11,11 +11,19 @@ WARNING: This module is experimental and not part of the stable API.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
+import mlx.core as mx
 import numpy as np
+from PIL import Image
 
 from corridorkey_mlx.inference.tiling import _compute_tile_coords
+from corridorkey_mlx.io.image import normalize_rgb
+
+if TYPE_CHECKING:
+    from corridorkey_mlx.model.corridorkey import GreenFormer
 
 logger = logging.getLogger(__name__)
 
@@ -212,3 +220,188 @@ def select_tiles(
         len(selected) / max(total_tiles, 1) * 100,
     )
     return selected
+
+
+# ---------------------------------------------------------------------------
+# Preprocessing helpers
+# ---------------------------------------------------------------------------
+
+
+def _resize_to_square(arr: np.ndarray, size: int) -> np.ndarray:
+    """Resize HW or HWC array to (size, size) using PIL bicubic."""
+    if arr.ndim == 2:
+        pil = Image.fromarray((np.clip(arr, 0, 1) * 255).astype(np.uint8), mode="L")
+        pil = pil.resize((size, size), Image.BICUBIC)
+        return np.asarray(pil, dtype=np.float32) / 255.0
+    # HWC
+    pil = Image.fromarray((np.clip(arr, 0, 1) * 255).astype(np.uint8))
+    pil = pil.resize((size, size), Image.BICUBIC)
+    return np.asarray(pil, dtype=np.float32) / 255.0
+
+
+def _build_input(rgb_f32: np.ndarray, hint_f32: np.ndarray) -> mx.array:
+    """Build (1, H, W, 4) NHWC input from RGB and alpha hint arrays.
+
+    Args:
+        rgb_f32: (H, W, 3) float32 in [0, 1].
+        hint_f32: (H, W) or (H, W, 1) float32 in [0, 1].
+    """
+    normalized = normalize_rgb(rgb_f32)
+    if hint_f32.ndim == 2:
+        hint_f32 = hint_f32[:, :, np.newaxis]
+    combined = np.concatenate([normalized, hint_f32], axis=-1)
+    return mx.array(combined[np.newaxis])
+
+
+def _run_model(model: GreenFormer, x: mx.array) -> dict[str, mx.array]:
+    """Run model and materialize outputs."""
+    outputs = model(x)
+    # NOTE: mx.eval is MLX array materialization, not Python eval()
+    mx.eval(outputs)  # noqa: S307
+    return outputs
+
+
+# ---------------------------------------------------------------------------
+# Two-pass selective refinement pipeline
+# ---------------------------------------------------------------------------
+
+
+def selective_refine(
+    model: GreenFormer,
+    image: np.ndarray,
+    alpha_hint: np.ndarray,
+    config: SelectiveRefineConfig | None = None,
+) -> SelectiveRefineResult:
+    """Run two-pass selective refinement inference.
+
+    1. Coarse pass: resize full image to coarse_size, run model, get alpha_coarse
+    2. Uncertainty mask from coarse alpha
+    3. Upsample mask to full resolution
+    4. Select tiles overlapping uncertain regions
+    5. Run model on each selected tile from full-res image
+    6. Return raw results (blending/stitching in phase 3)
+
+    Args:
+        model: Loaded GreenFormer. img_size must equal config.tile_size.
+        image: (H, W, 3) uint8 RGB input.
+        alpha_hint: (H, W) or (H, W, 1) uint8 coarse alpha hint.
+        config: Pipeline configuration. Uses defaults if None.
+
+    Returns:
+        SelectiveRefineResult with coarse + per-tile outputs.
+    """
+    if config is None:
+        config = SelectiveRefineConfig()
+
+    full_h, full_w = image.shape[:2]
+    stats: dict[str, object] = {}
+
+    # -- Convert to float32 [0, 1] --
+    rgb_f32 = image.astype(np.float32) / 255.0
+    hint_f32 = alpha_hint.astype(np.float32) / 255.0
+    if hint_f32.ndim == 3:
+        hint_f32 = hint_f32[:, :, 0]
+
+    # ---------------------------------------------------------------
+    # Step 1: Coarse pass
+    # ---------------------------------------------------------------
+    t0 = time.perf_counter()
+
+    coarse_rgb = _resize_to_square(rgb_f32, config.coarse_size)
+    coarse_hint = _resize_to_square(hint_f32, config.coarse_size)
+    coarse_input = _build_input(coarse_rgb, coarse_hint)
+
+    coarse_out = _run_model(model, coarse_input)
+
+    coarse_alpha_f32 = np.array(coarse_out["alpha_final"][0, :, :, 0])  # (cs, cs)
+
+    stats["coarse_ms"] = (time.perf_counter() - t0) * 1000
+
+    # -- Upsample coarse alpha to full res for output --
+    coarse_alpha_pil = Image.fromarray(
+        (np.clip(coarse_alpha_f32, 0, 1) * 255).astype(np.uint8), mode="L"
+    )
+    coarse_alpha_upscaled = np.asarray(
+        coarse_alpha_pil.resize((full_w, full_h), Image.BICUBIC), dtype=np.uint8
+    )
+
+    # ---------------------------------------------------------------
+    # Step 2: Uncertainty mask (at coarse resolution)
+    # ---------------------------------------------------------------
+    mask_coarse = compute_uncertainty_mask(coarse_alpha_f32, config)
+
+    # Upsample mask to full resolution
+    mask_pil = Image.fromarray(mask_coarse.astype(np.uint8) * 255, mode="L")
+    mask_fullres = (
+        np.asarray(mask_pil.resize((full_w, full_h), Image.NEAREST), dtype=np.uint8)
+        > 127
+    )
+    stats["mask_coverage"] = float(np.mean(mask_fullres))
+
+    # ---------------------------------------------------------------
+    # Step 3: Tile selection
+    # ---------------------------------------------------------------
+    tile_coords = select_tiles(mask_fullres, full_h, full_w, config)
+    stats["tiles_selected"] = len(tile_coords)
+    stats["tiles_total"] = len(
+        _compute_tile_coords(full_h, config.tile_size, config.tile_overlap)
+    ) * len(_compute_tile_coords(full_w, config.tile_size, config.tile_overlap))
+
+    # ---------------------------------------------------------------
+    # Step 4: Per-tile refinement
+    # ---------------------------------------------------------------
+    t1 = time.perf_counter()
+
+    tile_results: list[dict[str, np.ndarray]] = []
+    for y0, x0, y1, x1 in tile_coords:
+        # Extract tile from full-res image
+        tile_rgb = rgb_f32[y0:y1, x0:x1, :]
+        tile_hint = hint_f32[y0:y1, x0:x1]
+
+        actual_h, actual_w = tile_rgb.shape[:2]
+
+        # Resize tile to model input size if needed
+        if actual_h != config.tile_size or actual_w != config.tile_size:
+            tile_rgb = _resize_to_square(tile_rgb, config.tile_size)
+            tile_hint = _resize_to_square(tile_hint, config.tile_size)
+
+        tile_input = _build_input(tile_rgb, tile_hint)
+        tile_out = _run_model(model, tile_input)
+
+        # Store as numpy at tile_size resolution
+        tile_results.append({
+            "alpha": np.array(tile_out["alpha_final"][0, :, :, 0]),  # (ts, ts)
+            "fg": np.array(tile_out["fg_final"][0]),  # (ts, ts, 3)
+        })
+
+    stats["tile_refine_ms"] = (time.perf_counter() - t1) * 1000
+
+    # ---------------------------------------------------------------
+    # Step 5: Build result (no stitching yet — phase 3)
+    # ---------------------------------------------------------------
+    # For now: alpha_final and fg_final are just the upscaled coarse.
+    # Phase 3 will blend refined tiles into this.
+    coarse_fg_f32 = np.array(coarse_out["fg_final"][0])  # (cs, cs, 3)
+    coarse_fg_pil = Image.fromarray(
+        (np.clip(coarse_fg_f32, 0, 1) * 255).astype(np.uint8), mode="RGB"
+    )
+    coarse_fg_upscaled = np.asarray(
+        coarse_fg_pil.resize((full_w, full_h), Image.BICUBIC), dtype=np.uint8
+    )
+
+    stats["total_ms"] = stats["coarse_ms"] + stats["tile_refine_ms"]
+
+    # Store tile_results in stats for phase 3 to consume
+    stats["_tile_results"] = tile_results
+
+    if len(tile_coords) == 0:
+        logger.warning("No tiles selected — returning upscaled coarse result")
+
+    return SelectiveRefineResult(
+        alpha_final=coarse_alpha_upscaled,
+        fg_final=coarse_fg_upscaled,
+        coarse_alpha=coarse_alpha_upscaled,
+        uncertainty_mask=mask_fullres,
+        tile_coords=tile_coords,
+        stats=stats,
+    )

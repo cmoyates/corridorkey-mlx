@@ -205,10 +205,11 @@ Warnings: none
 
 #### Phase 2: Two-pass pipeline
 
-- Coarse pass: resize + preprocess + model + postprocess
-- Tile extraction from full-res
-- Per-tile model forward pass
-- Return raw results (no blending yet)
+- [x] Coarse pass: resize + preprocess + model + postprocess
+- [x] Tile extraction from full-res
+- [x] Per-tile model forward pass
+- [x] Return raw results (no blending yet)
+- [x] 7 pipeline tests (type, shapes, dtypes, stats, edge cases)
 
 **Files:** `selective_refine.py` (main pipeline func)
 
