@@ -26,9 +26,7 @@ SAFETENSORS_PATH = Path("checkpoints/corridorkey_mlx.safetensors")
 
 
 @pytest.fixture(scope="module")
-def checkpoint_data() -> (
-    tuple[dict[str, np.ndarray], OrderedDict[str, np.ndarray], list]
-):
+def checkpoint_data() -> tuple[dict[str, np.ndarray], OrderedDict[str, np.ndarray], list]:
     """Load and convert checkpoint once for all tests in this module."""
     if not CHECKPOINT_PATH.exists():
         pytest.skip("Checkpoint not found — need CorridorKey_v1.0.pth")

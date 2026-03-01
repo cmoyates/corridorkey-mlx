@@ -185,11 +185,11 @@ source_key -> dest_key | src_shape -> dst_shape | transform
 
 **Deliverables:**
 
-- [ ] `src/corridorkey_mlx/model/backbone.py` -- Hiera MLX port
-- [ ] `src/corridorkey_mlx/model/corridorkey.py` -- full model composition
-- [ ] `src/corridorkey_mlx/inference/pipeline.py` -- load, preprocess, forward, postprocess, save
-- [ ] `src/corridorkey_mlx/io/image.py` -- PIL-based image I/O + preprocessing
-- [ ] End-to-end parity test against PyTorch golden output
+- [x] `src/corridorkey_mlx/model/backbone.py` -- Hiera MLX port
+- [x] `src/corridorkey_mlx/model/corridorkey.py` -- full model composition
+- [x] `src/corridorkey_mlx/inference/pipeline.py` -- load, preprocess, forward, postprocess, save
+- [x] `src/corridorkey_mlx/io/image.py` -- PIL-based image I/O + preprocessing
+- [x] End-to-end parity test against PyTorch golden output
 
 **Files touched:**
 
@@ -217,9 +217,9 @@ source_key -> dest_key | src_shape -> dst_shape | transform
 
 **Deliverables:**
 
-- [ ] `scripts/bench_mlx.py` -- latency, throughput, memory reporting
-- [ ] `scripts/compare_reference.py` -- side-by-side output comparison
-- [ ] Performance optimizations (compile, memory layout, batching)
+- [ ] `scripts/bench_mlx.py` -- latency, throughput, memory reporting (future)
+- [ ] `scripts/compare_reference.py` -- side-by-side output comparison (future)
+- [ ] Performance optimizations (compile, memory layout, batching) (future)
 
 **Potential optimizations:**
 - `mx.compile()` on hot paths

@@ -33,9 +33,7 @@ def _skip_if_missing() -> None:
 
 
 @pytest.fixture(scope="module")
-def backbone_and_fixtures() -> (
-    tuple[list[mx.array], dict[str, np.ndarray]]
-):
+def backbone_and_fixtures() -> tuple[list[mx.array], dict[str, np.ndarray]]:
     """Load backbone once, return (mlx_features, fixtures)."""
     _skip_if_missing()
 
@@ -74,10 +72,7 @@ def test_stage_parity(
     abs_err = np.abs(result_nchw - expected_nchw)
     max_abs_err = float(np.max(abs_err))
     mean_abs_err = float(np.mean(abs_err))
-    print(
-        f"\nStage {stage_idx} parity — "
-        f"max_abs: {max_abs_err:.6e}, mean_abs: {mean_abs_err:.6e}"
-    )
+    print(f"\nStage {stage_idx} parity — max_abs: {max_abs_err:.6e}, mean_abs: {mean_abs_err:.6e}")
 
     assert max_abs_err < MAX_ABS_TOL, (
         f"Stage {stage_idx} max abs error {max_abs_err:.6e} exceeds tolerance {MAX_ABS_TOL}"
