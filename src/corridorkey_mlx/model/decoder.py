@@ -42,6 +42,13 @@ class DecoderHead(nn.Module):
         self.linear_c3 = MLP(in_channels[2], embed_dim)
         self.linear_c4 = MLP(in_channels[3], embed_dim)
 
+        # Pre-build upsamplers for feature maps at strides 2x, 4x, 8x
+        # relative to the first (stride-4) feature map.
+        upsample_kwargs = {"mode": "linear", "align_corners": False}
+        self._upsampler_2x = nn.Upsample(scale_factor=(2.0, 2.0), **upsample_kwargs)
+        self._upsampler_4x = nn.Upsample(scale_factor=(4.0, 4.0), **upsample_kwargs)
+        self._upsampler_8x = nn.Upsample(scale_factor=(8.0, 8.0), **upsample_kwargs)
+
         fused_channels = embed_dim * len(in_channels)
         self.linear_fuse = nn.Conv2d(fused_channels, embed_dim, kernel_size=1, bias=False)
         self.bn = nn.BatchNorm(embed_dim)
@@ -61,12 +68,13 @@ class DecoderHead(nn.Module):
             Logits in NHWC: (B, H/4, W/4, output_dim)
         """
         c1, c2, c3, c4 = features
-        target_h, target_w = c1.shape[1], c1.shape[2]  # H/4, W/4
+        upsamplers = [None, self._upsampler_2x, self._upsampler_4x, self._upsampler_8x]
 
         projected = []
-        for feat, linear in zip(
+        for feat, linear, up in zip(
             [c1, c2, c3, c4],
             [self.linear_c1, self.linear_c2, self.linear_c3, self.linear_c4],
+            upsamplers,
             strict=True,
         ):
             b, h, w, _c = feat.shape
@@ -74,16 +82,8 @@ class DecoderHead(nn.Module):
             x = feat.reshape(b, h * w, _c)
             x = linear(x)  # (B, H*W, embed_dim)
             x = x.reshape(b, h, w, -1)  # (B, H, W, embed_dim)
-            # Upsample to target spatial size
-            if h != target_h or w != target_w:
-                scale_h = target_h / h
-                scale_w = target_w / w
-                upsampler = nn.Upsample(
-                    scale_factor=(scale_h, scale_w),
-                    mode="linear",
-                    align_corners=False,
-                )
-                x = upsampler(x)
+            if up is not None:
+                x = up(x)
             projected.append(x)
 
         # Concatenate along channel dim (last dim in NHWC)

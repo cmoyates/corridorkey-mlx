@@ -38,6 +38,11 @@ class GreenFormer(nn.Module):
         self.fg_decoder = DecoderHead(BACKBONE_CHANNELS, EMBED_DIM, output_dim=3)
         self.refiner = CNNRefinerModule()
 
+        # Decoder outputs at stride-4 (H/4, W/4); upsampler is always 4x
+        self._logit_upsampler = nn.Upsample(
+            scale_factor=(4.0, 4.0), mode="linear", align_corners=False
+        )
+
     def __call__(self, x: mx.array) -> dict[str, mx.array]:
         """Forward pass.
 
@@ -49,8 +54,6 @@ class GreenFormer(nn.Module):
             alpha_coarse, fg_coarse, delta_logits, alpha_final, fg_final.
             All tensors in NHWC format.
         """
-        input_h, input_w = x.shape[1], x.shape[2]
-
         # Backbone -> 4 multiscale feature maps in NHWC
         features = self.backbone(x)
 
@@ -58,16 +61,9 @@ class GreenFormer(nn.Module):
         alpha_logits = self.alpha_decoder(features)  # (B, H/4, W/4, 1)
         fg_logits = self.fg_decoder(features)  # (B, H/4, W/4, 3)
 
-        # Upsample logits to full input resolution
-        scale_h = input_h / alpha_logits.shape[1]
-        scale_w = input_w / alpha_logits.shape[2]
-        upsampler = nn.Upsample(
-            scale_factor=(scale_h, scale_w),
-            mode="linear",
-            align_corners=False,
-        )
-        alpha_logits_up = upsampler(alpha_logits)  # (B, H, W, 1)
-        fg_logits_up = upsampler(fg_logits)  # (B, H, W, 3)
+        # Upsample logits to full input resolution (4x from stride-4 decoder)
+        alpha_logits_up = self._logit_upsampler(alpha_logits)  # (B, H, W, 1)
+        fg_logits_up = self._logit_upsampler(fg_logits)  # (B, H, W, 3)
 
         # Coarse predictions via sigmoid
         alpha_coarse = mx.sigmoid(alpha_logits_up)
