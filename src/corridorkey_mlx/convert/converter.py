@@ -39,6 +39,21 @@ REFINER_STEM_MAP: dict[str, str] = {
 # Keys to skip entirely (not needed by MLX)
 SKIP_SUFFIXES = (".num_batches_tracked",)
 
+# Explicit set of conv weight keys that need NCHW→NHWC transpose.
+# Uses pre-remap names (checked before key remapping in the conversion loop).
+CONV_WEIGHT_KEYS: frozenset[str] = frozenset(
+    [
+        "encoder.model.patch_embed.proj.weight",
+        "alpha_decoder.linear_fuse.weight",
+        "alpha_decoder.classifier.weight",
+        "fg_decoder.linear_fuse.weight",
+        "fg_decoder.classifier.weight",
+        "refiner.stem.0.weight",
+        "refiner.final.weight",
+    ]
+    + [f"refiner.res{i}.conv{j}.weight" for i in range(1, 5) for j in range(1, 3)]
+)
+
 
 # ---------------------------------------------------------------------------
 # Diagnostic record
@@ -57,13 +72,9 @@ class ConversionRecord:
 # ---------------------------------------------------------------------------
 # Transform helpers
 # ---------------------------------------------------------------------------
-def _is_conv_weight(key: str, arr: np.ndarray) -> bool:
-    """Check if a weight is a conv kernel (4D with spatial dims > 1)."""
-    if arr.ndim != 4:
-        return False
-    # 4D with spatial dims — conv weight, not a weird batch param
-    # Also check suffix to avoid false positives
-    return key.endswith(".weight")
+def _is_conv_weight(key: str) -> bool:
+    """Check if a weight is a conv kernel that needs NCHW→NHWC transpose."""
+    return key in CONV_WEIGHT_KEYS
 
 
 def _transpose_conv_weight(arr: np.ndarray) -> np.ndarray:
@@ -102,12 +113,10 @@ def convert_state_dict(
     """
     converted: OrderedDict[str, np.ndarray] = OrderedDict()
     diagnostics: list[ConversionRecord] = []
-    skipped: list[tuple[str, str]] = []
 
     for src_key, arr in state_dict.items():
         # Skip keys MLX doesn't need
         if _should_skip(src_key):
-            skipped.append((src_key, "num_batches_tracked — not used by MLX"))
             continue
 
         # Remap key
@@ -115,7 +124,7 @@ def convert_state_dict(
 
         # Apply transform
         src_shape = arr.shape
-        if _is_conv_weight(src_key, arr):
+        if _is_conv_weight(src_key):
             transformed = _transpose_conv_weight(arr)
             transform_name = "conv_transpose(O,I,H,W→O,H,W,I)"
         else:
