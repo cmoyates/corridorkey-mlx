@@ -388,7 +388,8 @@ class HieraBackbone(nn.Module):
         # Patch embedding
         self.patch_embed = HieraPatchEmbed()
 
-        # Positional embedding (loaded from checkpoint, interpolated at load time)
+        # Positional embedding — placeholder overwritten by load_checkpoint().
+        # Declared as mx.array so load_weights() can assign it; frozen via .eval().
         self.pos_embed = mx.zeros((1, _prod(self.tokens_spatial_shape), EMBED_DIM))
 
         # Build all 24 blocks
