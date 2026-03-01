@@ -199,7 +199,76 @@ result = tiled_inference(model, x, tile_size=512, overlap=64)
 uv run python scripts/compare_reference.py
 ```
 
+## Using as a CorridorKey backend
+
+This repo can be consumed as a drop-in MLX backend by the main CorridorKey app.
+
+### Install (editable, from sibling checkout)
+
+```bash
+# from the main CorridorKey repo directory
+uv pip install -e ../corridorkey-mlx
+```
+
+### Engine API
+
+```python
+from corridorkey_mlx import CorridorKeyMLXEngine
+
+engine = CorridorKeyMLXEngine(
+    checkpoint_path="/abs/path/to/corridorkey_mlx.safetensors",
+    img_size=2048,       # production (512 for dev)
+    use_refiner=True,
+    compile=True,        # faster after first call
+)
+
+result = engine.process_frame(rgb_uint8, mask_uint8)
+# result["alpha"]     — (H, W) uint8 alpha matte
+# result["fg"]        — (H, W, 3) uint8 foreground
+# result["comp"]      — (H, W, 3) uint8 fg composited over black
+# result["processed"] — (H, W, 3) uint8 (placeholder, same as fg)
+```
+
+### Expected inputs
+
+- **image**: numpy uint8 `(H, W, 3)` RGB. sRGB color space (standard).
+- **mask**: numpy uint8 `(H, W)` or `(H, W, 1)` grayscale alpha hint.
+- **checkpoint**: `.safetensors` format, converted from PyTorch via `scripts/convert_weights.py`.
+
+Inputs are resized internally to `img_size` for inference, then outputs are
+resized back to the original input resolution.
+
+### Smoke test
+
+```bash
+uv run python scripts/smoke_engine.py \
+    --image input.png --hint hint.png \
+    --checkpoint checkpoints/corridorkey_mlx.safetensors \
+    --img-size 512
+```
+
+### Standalone scripts vs engine usage
+
+| | Standalone (`scripts/infer.py`) | Engine (`CorridorKeyMLXEngine`) |
+|---|---|---|
+| Input | file paths | numpy arrays |
+| Output | saved PNGs | in-memory dict |
+| Returns | `alpha`, `foreground` | `alpha`, `fg`, `comp`, `processed` |
+| Default img_size | 512 | 2048 |
+| Use case | one-off CLI inference | app backend integration |
+
+### Stubs (not yet implemented)
+
+- `despill_strength` — accepted but ignored (warns once)
+- `auto_despeckle` / `despeckle_size` — accepted but ignored (warns once)
+- `input_is_linear` — accepted but no-op (model expects sRGB)
+
+### Python version
+
+Requires Python >=3.11. Compatible with the main CorridorKey repo's 3.11 target.
+
 ## Current Status
 
 Phases 1–6 complete. Full model assembly with end-to-end parity verified.
 Optimization, benchmarking, and tiled inference available.
+Engine integration surface available for backend consumption.
