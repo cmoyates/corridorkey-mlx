@@ -145,9 +145,9 @@ RGB + coarse alpha hint (4ch)
 
 **Deliverables:**
 
-- [ ] `src/corridorkey_mlx/convert/converter.py` -- key mapping + weight transforms
-- [ ] Conversion diagnostic report (source key -> dest key, shapes, transform applied)
-- [ ] Output as safetensors
+- [x] `src/corridorkey_mlx/convert/converter.py` -- key mapping + weight transforms
+- [x] Conversion diagnostic report (source key -> dest key, shapes, transform applied)
+- [x] Output as safetensors
 
 **Files touched:**
 
