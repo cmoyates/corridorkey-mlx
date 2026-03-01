@@ -289,9 +289,9 @@ class MaskUnitAttention(nn.Module):
         attn = mx.softmax(attn, axis=-1)
         x = attn @ v
 
-        # [B, heads, num_windows, tokens, head_dim] -> [B, num_windows, tokens, heads, head_dim]
-        # -> [B, N', dim_out]
-        x = mx.transpose(x, axes=(0, 2, 3, 1, 4))
+        # [B, heads, num_windows, tokens, head_dim] -> [B, tokens, num_windows, heads, head_dim]
+        # -> [B, N', dim_out]  (matches PyTorch transpose(1, 3))
+        x = mx.transpose(x, axes=(0, 3, 2, 1, 4))
         x = x.reshape(batch_size, -1, self.dim_out)
 
         return self.proj(x)
