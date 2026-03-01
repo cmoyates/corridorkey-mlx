@@ -42,6 +42,7 @@ RGB image + coarse alpha hint (4ch)
 | 3 | Checkpoint conversion (PyTorch → MLX) | Done |
 | 4 | Hiera backbone port | Done |
 | 5 | Full model assembly + e2e parity | Done |
+| 6 | Optimization + benchmarking | Done |
 
 See `prompts/` for detailed phase instructions.
 
@@ -147,6 +148,58 @@ End-to-end parity vs PyTorch reference (512×512, float32):
 | alpha_final | 2.6e-05 | 8.7e-08 |
 | fg_final | 9.5e-06 | 1.1e-06 |
 
+## Performance
+
+### Compiled inference
+
+Use `compile=True` for fused execution on fixed-resolution inputs:
+
+```python
+model = load_model("checkpoints/corridorkey_mlx.safetensors", img_size=512, compile=True)
+```
+
+The first call incurs a one-time compilation cost. Subsequent calls at the same
+resolution run faster. Shapeless compilation (`shapeless=True`) is **not recommended**
+due to shape-dependent reshapes in the Hiera backbone.
+
+### Benchmarking
+
+```bash
+uv run python scripts/bench_mlx.py
+uv run python scripts/bench_mlx.py --resolutions 256 512 1024 --bench-runs 20
+```
+
+Reports eager vs compiled latency, warmup cost, and parity check per resolution.
+
+### Large images (tiled inference)
+
+For images larger than the model's input resolution, use tiled inference with
+overlap blending:
+
+```python
+from corridorkey_mlx.inference.tiling import tiled_inference
+
+model = load_model("checkpoints/corridorkey_mlx.safetensors", img_size=512)
+x = preprocess(rgb, alpha_hint)  # full-resolution (1, H, W, 4)
+result = tiled_inference(model, x, tile_size=512, overlap=64)
+```
+
+### Recommended settings for Apple Silicon
+
+| Setting | Value | Notes |
+|---------|-------|-------|
+| `img_size` | 512 | Good speed/quality balance |
+| `compile` | True | ~1.5–2x faster after warmup |
+| `tile_size` | 512 | Match `img_size` for tiling |
+| `overlap` | 64 | Smooth blending at tile boundaries |
+
+### Comparing against PyTorch reference
+
+```bash
+uv run python scripts/compare_reference.py
+```
+
 ## Current Status
 
-Phases 1–5 complete. Full model assembly with end-to-end parity verified.
+Phases 1–6 complete. Full model assembly with end-to-end parity verified.
+Optimization, benchmarking, and tiled inference available.

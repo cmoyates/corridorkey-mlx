@@ -217,9 +217,9 @@ source_key -> dest_key | src_shape -> dst_shape | transform
 
 **Deliverables:**
 
-- [ ] `scripts/bench_mlx.py` -- latency, throughput, memory reporting (future)
-- [ ] `scripts/compare_reference.py` -- side-by-side output comparison (future)
-- [ ] Performance optimizations (compile, memory layout, batching) (future)
+- [x] `scripts/bench_mlx.py` -- latency, throughput, memory reporting
+- [x] `scripts/compare_reference.py` -- side-by-side output comparison
+- [x] Performance optimizations (compile, memory layout, batching)
 
 **Potential optimizations:**
 - `mx.compile()` on hot paths

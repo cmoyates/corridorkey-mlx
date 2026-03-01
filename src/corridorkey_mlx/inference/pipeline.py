@@ -31,10 +31,35 @@ DEFAULT_IMG_SIZE = 512
 def load_model(
     checkpoint: str | Path = DEFAULT_CHECKPOINT,
     img_size: int = DEFAULT_IMG_SIZE,
+    compile: bool = False,
+    shapeless: bool = False,
 ) -> GreenFormer:
-    """Build GreenFormer and load weights from safetensors checkpoint."""
+    """Build GreenFormer and load weights from safetensors checkpoint.
+
+    Args:
+        checkpoint: Path to converted MLX safetensors weights.
+        img_size: Input resolution (square). Must match at inference time.
+        compile: If True, wrap forward pass with mx.compile for fused execution.
+        shapeless: If True, use shapeless=True with mx.compile. Only safe when
+            no shape-dependent logic varies across calls. The Hiera backbone
+            uses shape-dependent reshapes, so shapeless is NOT recommended
+            unless all inputs share the same spatial dimensions.
+    """
     model = GreenFormer(img_size=img_size)
     model.load_checkpoint(checkpoint)
+    if compile:
+        model = compile_model(model, shapeless=shapeless)
+    return model
+
+
+def compile_model(model: GreenFormer, shapeless: bool = False) -> GreenFormer:
+    """Wrap model forward pass with mx.compile for fused execution.
+
+    Fixed-shape compile (shapeless=False) is safe for all inputs of the
+    same resolution. Shapeless compile is experimental — the backbone uses
+    shape-dependent reshapes that may trigger recompilation.
+    """
+    model.__call__ = mx.compile(model.__call__, shapeless=shapeless)  # type: ignore[method-assign]
     return model
 
 
