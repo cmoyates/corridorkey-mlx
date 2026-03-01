@@ -2,6 +2,7 @@
 
 Phase 1: uncertainty mask, binary dilation, tile selection (synthetic data).
 Phase 2: two-pass pipeline with real model (random weights, small resolution).
+Phase 3: stitching, Gaussian blur, blended output.
 """
 
 from __future__ import annotations
@@ -14,9 +15,11 @@ from corridorkey_mlx.inference.selective_refine import (
     SelectiveRefineConfig,
     SelectiveRefineResult,
     _binary_dilation,
+    _gaussian_blur,
     compute_uncertainty_mask,
     select_tiles,
     selective_refine,
+    stitch_results,
 )
 from corridorkey_mlx.model.corridorkey import GreenFormer
 
@@ -300,6 +303,7 @@ class TestSelectiveRefinePipeline:
 
         assert "coarse_ms" in result.stats
         assert "tile_refine_ms" in result.stats
+        assert "stitch_ms" in result.stats
         assert "total_ms" in result.stats
         assert "tiles_selected" in result.stats
         assert "tiles_total" in result.stats
@@ -339,8 +343,8 @@ class TestSelectiveRefinePipeline:
         result = selective_refine(model, image, hint, config)
         assert result.alpha_final.shape == (512, 512)
 
-    def test_tile_results_stored(self, model: GreenFormer) -> None:
-        """Per-tile results should be stored in stats for phase 3."""
+    def test_stitch_ms_in_stats(self, model: GreenFormer) -> None:
+        """Stats should include stitch timing."""
         rng = np.random.default_rng(42)
         image = rng.integers(0, 256, (512, 512, 3), dtype=np.uint8)
         hint = rng.integers(0, 256, (512, 512), dtype=np.uint8)
@@ -352,12 +356,132 @@ class TestSelectiveRefinePipeline:
         )
 
         result = selective_refine(model, image, hint, config)
+        assert "stitch_ms" in result.stats
+        assert result.stats["stitch_ms"] >= 0
 
-        tile_results = result.stats.get("_tile_results")
-        assert isinstance(tile_results, list)
-        assert len(tile_results) == result.stats["tiles_selected"]
-        for tr in tile_results:
-            assert "alpha" in tr
-            assert "fg" in tr
-            assert tr["alpha"].shape == (SMALL_SIZE, SMALL_SIZE)
-            assert tr["fg"].shape == (SMALL_SIZE, SMALL_SIZE, 3)
+
+# ---------------------------------------------------------------------------
+# Phase 3: Gaussian blur + stitching
+# ---------------------------------------------------------------------------
+
+
+class TestGaussianBlur:
+    def test_zero_sigma_returns_copy(self) -> None:
+        arr = np.ones((10, 10), dtype=np.float32) * 0.5
+        result = _gaussian_blur(arr, sigma=0)
+        np.testing.assert_array_equal(result, arr)
+        assert result is not arr
+
+    def test_uniform_unchanged(self) -> None:
+        """Blurring a uniform array should return the same values."""
+        arr = np.full((20, 20), 0.7, dtype=np.float32)
+        result = _gaussian_blur(arr, sigma=3.0)
+        np.testing.assert_allclose(result, 0.7, atol=1e-5)
+
+    def test_preserves_shape(self) -> None:
+        arr = np.random.default_rng(42).random((30, 40)).astype(np.float32)
+        result = _gaussian_blur(arr, sigma=2.0)
+        assert result.shape == (30, 40)
+
+    def test_smooths_step_edge(self) -> None:
+        """Step edge should be smoothed into a gradient."""
+        arr = np.zeros((1, 100), dtype=np.float32)
+        arr[:, 50:] = 1.0
+        result = _gaussian_blur(arr, sigma=5.0)
+        # At the edge, values should be intermediate (not 0 or 1)
+        assert 0.1 < result[0, 50] < 0.9
+        # Far from edge, values should be near original
+        assert result[0, 0] < 0.05
+        assert result[0, 99] > 0.95
+
+    def test_output_range(self) -> None:
+        """Output should stay in [0, 1] for [0, 1] input."""
+        arr = np.random.default_rng(42).random((50, 50)).astype(np.float32)
+        result = _gaussian_blur(arr, sigma=4.0)
+        assert result.min() >= -1e-6
+        assert result.max() <= 1.0 + 1e-6
+
+
+class TestStitchResults:
+    def test_no_tiles_returns_coarse(self) -> None:
+        """Empty tile list → returns coarse unchanged."""
+        coarse_alpha = np.full((100, 100), 0.5, dtype=np.float32)
+        coarse_fg = np.full((100, 100, 3), 0.3, dtype=np.float32)
+        config = SelectiveRefineConfig()
+
+        alpha, fg = stitch_results(
+            coarse_alpha, coarse_fg, [], [], np.zeros((100, 100), dtype=bool), config
+        )
+        np.testing.assert_array_equal(alpha, coarse_alpha)
+        np.testing.assert_array_equal(fg, coarse_fg)
+
+    def test_single_tile_full_coverage(self) -> None:
+        """Single tile covering the whole image — result should be mostly refined."""
+        size = 64
+        coarse_alpha = np.full((size, size), 0.2, dtype=np.float32)
+        coarse_fg = np.full((size, size, 3), 0.2, dtype=np.float32)
+        tile_alpha = np.full((size, size), 0.8, dtype=np.float32)
+        tile_fg = np.full((size, size, 3), 0.8, dtype=np.float32)
+        mask = np.ones((size, size), dtype=bool)
+        config = SelectiveRefineConfig(
+            tile_size=size, tile_overlap=8, dilation_radius=4
+        )
+        tile_coords = [(0, 0, size, size)]
+        tile_results = [{"alpha": tile_alpha, "fg": tile_fg}]
+
+        alpha, fg = stitch_results(
+            coarse_alpha, coarse_fg, tile_results, tile_coords, mask, config
+        )
+
+        # Center should be dominated by refined values
+        center = size // 2
+        assert alpha[center, center] > 0.6
+        assert fg[center, center, 0] > 0.6
+
+    def test_output_shapes(self) -> None:
+        """Output shapes should match input."""
+        h, w = 80, 120
+        coarse_alpha = np.zeros((h, w), dtype=np.float32)
+        coarse_fg = np.zeros((h, w, 3), dtype=np.float32)
+        mask = np.ones((h, w), dtype=bool)
+        config = SelectiveRefineConfig(
+            tile_size=64, tile_overlap=8, dilation_radius=2
+        )
+
+        from corridorkey_mlx.inference.tiling import _compute_tile_coords
+
+        y_coords = _compute_tile_coords(h, 64, 8)
+        x_coords = _compute_tile_coords(w, 64, 8)
+        tile_coords = [
+            (ys, xs, ye, xe) for ys, ye in y_coords for xs, xe in x_coords
+        ]
+        tile_results = [
+            {
+                "alpha": np.full((ye - ys, xe - xs), 0.5, dtype=np.float32),
+                "fg": np.full((ye - ys, xe - xs, 3), 0.5, dtype=np.float32),
+            }
+            for ys, xs, ye, xe in tile_coords
+        ]
+
+        alpha, fg = stitch_results(
+            coarse_alpha, coarse_fg, tile_results, tile_coords, mask, config
+        )
+
+        assert alpha.shape == (h, w)
+        assert fg.shape == (h, w, 3)
+
+    def test_blend_weight_smoothness(self) -> None:
+        """Blend weight at mask boundary should be smooth, not binary."""
+        size = 100
+        mask = np.zeros((size, size), dtype=bool)
+        mask[20:80, 20:80] = True
+
+        # Test the Gaussian blur step directly
+        blend = _gaussian_blur(mask.astype(np.float32), sigma=5.0)
+
+        # At the mask edge, blend should be intermediate
+        assert 0.1 < blend[20, 50] < 0.9
+        # Inside mask, should be near 1
+        assert blend[50, 50] > 0.9
+        # Outside mask, should be near 0
+        assert blend[5, 5] < 0.1

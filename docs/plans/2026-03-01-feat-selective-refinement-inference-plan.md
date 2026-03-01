@@ -215,10 +215,11 @@ Warnings: none
 
 #### Phase 3: Stitching + blending
 
-- Bicubic upsample coarse to full-res
-- Accumulate refined tiles with blend weights
-- Soft boundary blending between coarse and refined regions
-- Final compositing
+- [x] Bicubic upsample coarse to full-res
+- [x] Accumulate refined tiles with blend weights (_make_blend_weights_2d)
+- [x] Soft boundary blending (Gaussian-blurred uncertainty mask)
+- [x] Final compositing integrated into selective_refine()
+- [x] 10 new tests (Gaussian blur + stitch_results + pipeline stitch_ms)
 
 **Files:** `selective_refine.py` (stitch func)
 
