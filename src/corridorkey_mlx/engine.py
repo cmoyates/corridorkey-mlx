@@ -129,13 +129,13 @@ class CorridorKeyMLXEngine:
         # -- resize to model resolution --
         if rgb_f32.shape[0] != self._img_size or rgb_f32.shape[1] != self._img_size:
             rgb_pil = Image.fromarray(image).resize(
-                (self._img_size, self._img_size), Image.BICUBIC
+                (self._img_size, self._img_size), Image.Resampling.BICUBIC
             )
             rgb_f32 = np.asarray(rgb_pil, dtype=np.float32) / 255.0
 
             mask_u8 = mask_linear if mask_linear.ndim == 2 else mask_linear[:, :, 0]
             mask_pil = Image.fromarray(mask_u8, mode="L").resize(
-                (self._img_size, self._img_size), Image.BICUBIC
+                (self._img_size, self._img_size), Image.Resampling.BICUBIC
             )
             mask_f32 = np.asarray(mask_pil, dtype=np.float32)[:, :, np.newaxis] / 255.0
 
@@ -172,11 +172,11 @@ class CorridorKeyMLXEngine:
         if alpha_u8.shape[0] != original_h or alpha_u8.shape[1] != original_w:
             target = (original_w, original_h)
             alpha_u8 = np.asarray(
-                Image.fromarray(alpha_u8, mode="L").resize(target, Image.BICUBIC),
+                Image.fromarray(alpha_u8, mode="L").resize(target, Image.Resampling.BICUBIC),
                 dtype=np.uint8,
             )
             fg_u8 = np.asarray(
-                Image.fromarray(fg_u8, mode="RGB").resize(target, Image.BICUBIC),
+                Image.fromarray(fg_u8, mode="RGB").resize(target, Image.Resampling.BICUBIC),
                 dtype=np.uint8,
             )
 

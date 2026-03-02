@@ -14,10 +14,10 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "mypy>=1.19.1",
     "pytest>=9.0.2",
     "pytest-xdist>=3.8.0",
     "ruff>=0.15.4",
+    "ty>=0.0.19",
 ]
 reference = [
     "timm>=1.0.25",
@@ -45,7 +45,8 @@ src = ["src"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "TCH"]
 
-[tool.mypy]
-python_version = "3.11"
-strict = true
-mypy_path = "src"
+[tool.ty.src]
+include = ["src/", "tests/"]
+
+[tool.ty.environment]
+python-version = "3.11"

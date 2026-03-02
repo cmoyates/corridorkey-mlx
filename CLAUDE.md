@@ -25,7 +25,7 @@ MLX inference port of CorridorKey for Apple Silicon.
 ## Conventions
 
 - Python 3.12+, uv for deps
-- ruff for lint/format, mypy for types, pytest for tests
+- ruff for lint/format, ty for types, pytest for tests
 - MLX uses NHWC — centralize layout transforms in `utils/`
 - All non-trivial changes need a validation path
 - Inference only — no training code
@@ -41,5 +41,5 @@ MLX inference port of CorridorKey for Apple Silicon.
 uv run pytest                # run tests
 uv run ruff check .          # lint
 uv run ruff format .         # format
-uv run mypy src/             # type check
+uv run ty check              # type check
 ```

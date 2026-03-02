@@ -95,7 +95,7 @@ results = infer_and_save(model, "input.png", "alpha_hint.png", "output/")
 uv run pytest              # tests
 uv run ruff check .        # lint
 uv run ruff format .       # format
-uv run mypy src/           # type check
+uv run ty check            # type check
 ```
 
 For PyTorch reference work:

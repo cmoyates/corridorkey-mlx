@@ -44,10 +44,15 @@ class DecoderHead(nn.Module):
 
         # Pre-build upsamplers for feature maps at strides 2x, 4x, 8x
         # relative to the first (stride-4) feature map.
-        upsample_kwargs = {"mode": "linear", "align_corners": False}
-        self._upsampler_2x = nn.Upsample(scale_factor=(2.0, 2.0), **upsample_kwargs)
-        self._upsampler_4x = nn.Upsample(scale_factor=(4.0, 4.0), **upsample_kwargs)
-        self._upsampler_8x = nn.Upsample(scale_factor=(8.0, 8.0), **upsample_kwargs)
+        self._upsampler_2x = nn.Upsample(
+            scale_factor=(2.0, 2.0), mode="linear", align_corners=False
+        )
+        self._upsampler_4x = nn.Upsample(
+            scale_factor=(4.0, 4.0), mode="linear", align_corners=False
+        )
+        self._upsampler_8x = nn.Upsample(
+            scale_factor=(8.0, 8.0), mode="linear", align_corners=False
+        )
 
         fused_channels = embed_dim * len(in_channels)
         self.linear_fuse = nn.Conv2d(fused_channels, embed_dim, kernel_size=1, bias=False)

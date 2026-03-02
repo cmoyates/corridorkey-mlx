@@ -160,7 +160,7 @@ def load_pytorch_checkpoint(checkpoint_path: Path) -> dict[str, np.ndarray]:
 
     Requires torch to be installed (reference dependency group).
     """
-    import torch
+    import torch  # ty: ignore[unresolved-import]
 
     raw = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     state_dict = raw.get("state_dict", raw)

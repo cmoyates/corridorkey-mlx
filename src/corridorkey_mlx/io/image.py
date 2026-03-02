@@ -28,7 +28,7 @@ def load_image(path: str | Path, img_size: int | None = None) -> np.ndarray:
     """
     img = Image.open(path).convert("RGB")
     if img_size is not None:
-        img = img.resize((img_size, img_size), Image.BICUBIC)
+        img = img.resize((img_size, img_size), Image.Resampling.BICUBIC)
     return np.asarray(img, dtype=np.float32) / 255.0
 
 
@@ -41,7 +41,7 @@ def load_alpha_hint(path: str | Path, img_size: int | None = None) -> np.ndarray
     """
     img = Image.open(path).convert("L")
     if img_size is not None:
-        img = img.resize((img_size, img_size), Image.BICUBIC)
+        img = img.resize((img_size, img_size), Image.Resampling.BICUBIC)
     return np.asarray(img, dtype=np.float32)[:, :, np.newaxis] / 255.0
 
 
