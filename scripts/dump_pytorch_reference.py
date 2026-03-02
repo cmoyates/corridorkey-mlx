@@ -96,7 +96,7 @@ class DecoderHead(nn.Module):
             x = F.interpolate(x, size=target_size, mode="bilinear", align_corners=False)
             projected.append(x)
 
-        fused = torch.cat(projected, dim=1)  # [B, embed_dim*4, H/4, W/4]
+        fused = torch.cat(projected[::-1], dim=1)  # [B, embed_dim*4, H/4, W/4]
         fused = self.linear_fuse(fused)
         fused = self.bn(fused)
         fused = F.relu(fused)

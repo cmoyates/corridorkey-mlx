@@ -91,7 +91,7 @@ class DecoderHead(nn.Module):
                 x = up(x)
             projected.append(x)
 
-        # Concatenate in c4, c3, c2, c1 order to match Torch decoder
+        # Concatenate in c4, c3, c2, c1 order to match trained weight layout
         fused = mx.concatenate(projected[::-1], axis=-1)  # (B, H/4, W/4, embed_dim*4)
         fused = self.linear_fuse(fused)
         fused = self.bn(fused)

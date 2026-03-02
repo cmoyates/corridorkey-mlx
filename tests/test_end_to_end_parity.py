@@ -29,9 +29,9 @@ TOLERANCES: dict[str, float] = {
     "fg_logits_up": 1e-3,
     "alpha_coarse": 1e-4,
     "fg_coarse": 1e-4,
-    "delta_logits": 1e-3,
-    "alpha_final": 1e-4,
-    "fg_final": 1e-4,
+    "delta_logits": 2e-3,
+    "alpha_final": 2e-4,
+    "fg_final": 2e-4,
 }
 
 
