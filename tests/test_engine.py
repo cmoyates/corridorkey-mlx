@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 import pytest
 
@@ -13,9 +11,7 @@ from corridorkey_mlx.engine import (
     _validate_mask,
 )
 
-CHECKPOINT = Path("checkpoints/corridorkey_mlx.safetensors")
-HAS_CHECKPOINT = CHECKPOINT.exists()
-
+from .conftest import MLX_CHECKPOINT_PATH, has_checkpoint
 
 # ---------------------------------------------------------------------------
 # Input validation (no checkpoint needed)
@@ -87,14 +83,14 @@ class TestEngineInit:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(not HAS_CHECKPOINT, reason="Checkpoint not available")
+@has_checkpoint
 class TestEngineIntegration:
     """Integration tests that load the real model."""
 
     @pytest.fixture(scope="class")
     def engine(self) -> CorridorKeyMLXEngine:
         return CorridorKeyMLXEngine(
-            checkpoint_path=CHECKPOINT,
+            checkpoint_path=MLX_CHECKPOINT_PATH,
             img_size=512,
             compile=False,
         )
@@ -128,10 +124,42 @@ class TestEngineIntegration:
         result = engine.process_frame(image, mask)
         assert "alpha" in result
 
-    def test_refiner_scale_zero_returns_coarse(
-        self, engine: CorridorKeyMLXEngine
-    ) -> None:
+    def test_refiner_scale_zero_returns_coarse(self, engine: CorridorKeyMLXEngine) -> None:
         image = np.random.default_rng(42).integers(0, 256, (64, 64, 3), dtype=np.uint8)
         mask = np.random.default_rng(42).integers(0, 256, (64, 64), dtype=np.uint8)
         result = engine.process_frame(image, mask, refiner_scale=0.0)
         assert result["alpha"].shape == (64, 64)
+
+
+# ---------------------------------------------------------------------------
+# Full 2048 inference (slow, requires checkpoint)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.slow
+@has_checkpoint
+def test_smoke_2048_full() -> None:
+    """Full 2048 inference with real checkpoint."""
+    engine = CorridorKeyMLXEngine(
+        checkpoint_path=MLX_CHECKPOINT_PATH,
+        img_size=2048,
+        compile=False,
+    )
+
+    rng = np.random.default_rng(42)
+    rgb = rng.integers(0, 256, (2048, 2048, 3), dtype=np.uint8)
+    mask = rng.integers(0, 256, (2048, 2048), dtype=np.uint8)
+
+    result = engine.process_frame(rgb, mask)
+
+    assert result["alpha"].shape == (2048, 2048)
+    assert result["alpha"].dtype == np.uint8
+    assert result["fg"].shape == (2048, 2048, 3)
+    assert result["comp"].shape == (2048, 2048, 3)
+
+    for key in ("alpha", "fg", "comp"):
+        arr = result[key]
+        assert not np.isnan(arr).any(), f"{key} contains NaN"
+        assert not np.isinf(arr).any(), f"{key} contains Inf"
+
+    assert result["alpha"].min() != result["alpha"].max(), "alpha is constant"
