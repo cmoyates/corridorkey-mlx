@@ -21,5 +21,11 @@ samples/
 # Inference outputs
 output/
 
+# Downloaded/cached weights
+weights/
+artifacts/
+*.safetensors
+*.partial
+
 # OS files
 .DS_Store

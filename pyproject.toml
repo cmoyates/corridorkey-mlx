@@ -8,6 +8,8 @@ dependencies = [
     "mlx>=0.31.0",
     "numpy>=2.0.0",
     "pillow>=10.0.0",
+    "platformdirs>=4.0.0",
+    "requests>=2.31.0",
     "rich>=13.0.0",
     "safetensors>=0.4.0",
 ]
@@ -24,6 +26,9 @@ reference = [
     "torch>=2.10.0",
     "torchvision>=0.25.0",
 ]
+
+[project.scripts]
+corridorkey-weights = "corridorkey_mlx.weights_cli:main"
 
 [build-system]
 requires = ["hatchling"]
