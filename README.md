@@ -54,6 +54,79 @@ See `prompts/` for detailed phase instructions.
 uv sync --group dev
 ```
 
+### Download weights
+
+Model weights (~400 MB) are distributed via GitHub Releases — not committed to git
+(binary blobs bloat history and exceed Git LFS free tiers).
+
+**CLI (quickest):**
+
+```bash
+# download latest release to platform cache dir
+uv run python -m corridorkey_mlx weights download
+
+# specific tag
+uv run python -m corridorkey_mlx weights download --tag v1.0.0
+
+# override asset name
+uv run python -m corridorkey_mlx weights download --asset corridorkey_mlx.safetensors
+
+# force re-download
+uv run python -m corridorkey_mlx weights download --force
+
+# print local path (for scripting)
+WEIGHTS=$(uv run python -m corridorkey_mlx weights download --print-path)
+```
+
+If installed as a package, a `corridorkey-weights` console script is also available:
+
+```bash
+corridorkey-weights download --tag v1.0.0 --print-path
+```
+
+**Where weights are cached:**
+
+| Platform | Path |
+|----------|------|
+| macOS | `~/Library/Caches/corridorkey_mlx/weights/<tag>/` |
+| Linux | `~/.cache/corridorkey_mlx/weights/<tag>/` |
+| Windows | `%LOCALAPPDATA%\corridorkey_mlx\Cache\weights\<tag>\` |
+
+**Environment variable overrides:**
+
+| Variable | Purpose |
+|----------|---------|
+| `CORRIDORKEY_MLX_WEIGHTS_REPO` | `owner/repo` for a different GitHub repo |
+| `CORRIDORKEY_MLX_WEIGHTS_TAG` | Default tag (instead of `latest`) |
+| `CORRIDORKEY_MLX_WEIGHTS_ASSET` | Default asset filename |
+| `GITHUB_TOKEN` | Auth token for higher API rate limits |
+
+**Python API:**
+
+```python
+from corridorkey_mlx.weights import download_weights
+
+path = download_weights(tag="v1.0.0")
+```
+
+### Publishing weights to a GitHub Release
+
+Generate the checksum, then upload both files:
+
+```bash
+# generate sha256 sidecar
+shasum -a 256 corridorkey_mlx.safetensors > corridorkey_mlx.safetensors.sha256
+
+# create release and upload assets
+gh release create v1.0.0 \
+    corridorkey_mlx.safetensors \
+    corridorkey_mlx.safetensors.sha256 \
+    --title "v1.0.0" --notes "Initial weights release"
+```
+
+The downloader verifies the SHA256 automatically. If no `.sha256` sidecar or
+`SHA256SUMS` file is found, verification is skipped with a warning.
+
 ### Convert weights
 
 Convert the PyTorch checkpoint to MLX safetensors (one-time):
