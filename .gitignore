@@ -29,3 +29,5 @@ artifacts/
 
 # OS files
 .DS_Store
+
+*.safetensors*
