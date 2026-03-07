@@ -1,7 +1,7 @@
 # Baseline Benchmarks (FP32, no optimizations)
 
 Date: 2026-03-07
-Hardware: Apple M4 Max (128GB unified)
+Hardware: Apple M3 Max (128GB unified)
 MLX version: 0.24.2
 Weights: corridorkey_mlx.safetensors (real checkpoint)
 Config: warmup=2, bench=3, batch=1, eager+compiled (isolated per resolution)

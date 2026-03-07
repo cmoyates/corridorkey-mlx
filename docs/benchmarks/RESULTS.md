@@ -1,6 +1,6 @@
 # Benchmark Results
 
-Hardware: Apple M4 Max (128GB unified)
+Hardware: Apple M3 Max (128GB unified)
 MLX version: 0.24.2
 Weights: `corridorkey_mlx.safetensors` (real checkpoint)
 Input: `samples/sample.png` (1920x1080) + `samples/hint.png` (1280x720), resized to model res
