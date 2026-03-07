@@ -12,15 +12,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import mlx.core as mx
+import mlx.nn as nn
 import numpy as np
-from PIL import Image
 
 from corridorkey_mlx.inference.pipeline import load_model
-from corridorkey_mlx.io.image import (
-    postprocess_alpha,
-    postprocess_foreground,
-    preprocess,
-)
 
 if TYPE_CHECKING:
     from corridorkey_mlx.model.corridorkey import GreenFormer
@@ -28,6 +23,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 PRODUCTION_IMG_SIZE = 2048
+
+# ImageNet normalization constants as MLX arrays for zero-copy preprocessing
+_IMAGENET_MEAN = mx.array([0.485, 0.456, 0.406], dtype=mx.float32)
+_IMAGENET_STD = mx.array([0.229, 0.224, 0.225], dtype=mx.float32)
 
 
 class CorridorKeyMLXEngine:
@@ -78,9 +77,7 @@ class CorridorKeyMLXEngine:
 
         self._img_size = img_size
         self._use_refiner = use_refiner
-        self._model: GreenFormer = load_model(
-            checkpoint, img_size=img_size, compile=compile
-        )
+        self._model: GreenFormer = load_model(checkpoint, img_size=img_size, compile=compile)
 
     def process_frame(
         self,
@@ -94,6 +91,9 @@ class CorridorKeyMLXEngine:
         despeckle_size: int = 400,
     ) -> dict[str, np.ndarray]:
         """Run inference on a single frame.
+
+        All preprocessing, inference, and postprocessing run as MLX ops on GPU.
+        A single ``np.array()`` sync happens at the end to return numpy results.
 
         Args:
             image: RGB input, uint8 ``(H, W, 3)``.
@@ -120,33 +120,32 @@ class CorridorKeyMLXEngine:
 
         original_h, original_w = image.shape[:2]
 
-        # -- to float32 [0, 1] --
-        rgb_f32 = image.astype(np.float32) / 255.0
-        mask_f32 = mask_linear.astype(np.float32) / 255.0
-        if mask_f32.ndim == 2:
-            mask_f32 = mask_f32[:, :, np.newaxis]
+        # -- convert to mx.array immediately (single CPU->GPU transfer) --
+        rgb_mx = mx.array(image).astype(mx.float32) / 255.0  # (H, W, 3)
+        mask_mx = mx.array(mask_linear).astype(mx.float32) / 255.0
+        if mask_mx.ndim == 2:
+            mask_mx = mask_mx[:, :, None]  # (H, W, 1)
 
-        # -- resize to model resolution --
-        if rgb_f32.shape[0] != self._img_size or rgb_f32.shape[1] != self._img_size:
-            rgb_pil = Image.fromarray(image).resize(
-                (self._img_size, self._img_size), Image.Resampling.BICUBIC
+        # -- resize to model resolution (MLX-native, no PIL) --
+        needs_resize = original_h != self._img_size or original_w != self._img_size
+        if needs_resize:
+            scale_h = self._img_size / original_h
+            scale_w = self._img_size / original_w
+            resizer = nn.Upsample(
+                scale_factor=(scale_h, scale_w), mode="linear", align_corners=False
             )
-            rgb_f32 = np.asarray(rgb_pil, dtype=np.float32) / 255.0
+            # nn.Upsample expects NHWC
+            rgb_mx = resizer(rgb_mx[None])[0]  # (img_size, img_size, 3)
+            mask_mx = resizer(mask_mx[None])[0]  # (img_size, img_size, 1)
 
-            mask_u8 = mask_linear if mask_linear.ndim == 2 else mask_linear[:, :, 0]
-            mask_pil = Image.fromarray(mask_u8, mode="L").resize(
-                (self._img_size, self._img_size), Image.Resampling.BICUBIC
-            )
-            mask_f32 = np.asarray(mask_pil, dtype=np.float32)[:, :, np.newaxis] / 255.0
+        # -- preprocess: ImageNet norm + alpha concat (all MLX ops) --
+        rgb_norm = (rgb_mx - _IMAGENET_MEAN) / _IMAGENET_STD
+        x = mx.concatenate([rgb_norm, mask_mx], axis=-1)[None]  # (1, H, W, 4)
 
-        # -- preprocess (ImageNet norm + concat) -> (1, H, W, 4) NHWC --
-        x = preprocess(rgb_f32, mask_f32)
+        # -- forward (slim=True skips 5 unused intermediate tensors) --
+        outputs = self._model(x, slim=True)
 
-        # -- forward --
-        outputs = self._model(x)
-        mx.eval(outputs)  # noqa: S307 — mx.eval materializes lazy MLX arrays, not Python eval
-
-        # -- select coarse vs refined --
+        # -- select coarse vs refined (MLX ops) --
         alpha_coarse = outputs["alpha_coarse"]
         fg_coarse = outputs["fg_coarse"]
         alpha_refined = outputs["alpha_final"]
@@ -159,26 +158,34 @@ class CorridorKeyMLXEngine:
             alpha_out = alpha_refined
             fg_out = fg_refined
         else:
-            # output-space lerp
             s = refiner_scale
             alpha_out = alpha_coarse * (1.0 - s) + alpha_refined * s
             fg_out = fg_coarse * (1.0 - s) + fg_refined * s
 
-        # -- postprocess to uint8 --
-        alpha_u8 = postprocess_alpha(alpha_out)
-        fg_u8 = postprocess_foreground(fg_out)
+        # -- resize back to original (MLX-native) --
+        if needs_resize:
+            inv_scale_h = original_h / self._img_size
+            inv_scale_w = original_w / self._img_size
+            inv_resizer = nn.Upsample(
+                scale_factor=(inv_scale_h, inv_scale_w),
+                mode="linear",
+                align_corners=False,
+            )
+            alpha_out = inv_resizer(alpha_out)  # (1, orig_h, orig_w, 1)
+            fg_out = inv_resizer(fg_out)  # (1, orig_h, orig_w, 3)
 
-        # -- resize back to original --
-        if alpha_u8.shape[0] != original_h or alpha_u8.shape[1] != original_w:
-            target = (original_w, original_h)
-            alpha_u8 = np.asarray(
-                Image.fromarray(alpha_u8, mode="L").resize(target, Image.Resampling.BICUBIC),
-                dtype=np.uint8,
-            )
-            fg_u8 = np.asarray(
-                Image.fromarray(fg_u8, mode="RGB").resize(target, Image.Resampling.BICUBIC),
-                dtype=np.uint8,
-            )
+        # -- postprocess to uint8 (MLX ops) --
+        alpha_out = mx.clip(alpha_out[0, :, :, 0], 0.0, 1.0)  # (H, W)
+        fg_out = mx.clip(fg_out[0], 0.0, 1.0)  # (H, W, 3)
+
+        alpha_u8_mx = (alpha_out * 255.0).astype(mx.uint8)
+        fg_u8_mx = (fg_out * 255.0).astype(mx.uint8)
+
+        # -- composite over black (MLX ops) --
+        if fg_is_straight:
+            comp_mx = (fg_out * alpha_out[:, :, None] * 255.0).astype(mx.uint8)
+        else:
+            comp_mx = fg_u8_mx
 
         # -- stubs: despill / despeckle --
         if despill_strength > 0.0 and not CorridorKeyMLXEngine._despill_warned:
@@ -195,14 +202,12 @@ class CorridorKeyMLXEngine:
             )
             CorridorKeyMLXEngine._despeckle_warned = True
 
-        # -- composite over black --
-        alpha_3ch = alpha_u8[:, :, np.newaxis].astype(np.float32) / 255.0
-        fg_float = fg_u8.astype(np.float32)
-        comp = (
-            (fg_float * alpha_3ch).astype(np.uint8)
-            if fg_is_straight
-            else fg_u8.copy()
-        )
+        # -- single GPU->CPU sync: materialize all outputs at once --
+        # mx.eval is MLX array materialization, not Python eval
+        mx.eval(alpha_u8_mx, fg_u8_mx, comp_mx)  # noqa: S307
+        alpha_u8 = np.array(alpha_u8_mx)
+        fg_u8 = np.array(fg_u8_mx)
+        comp = np.array(comp_mx)
 
         return {
             "alpha": alpha_u8,

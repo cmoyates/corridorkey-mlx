@@ -43,16 +43,18 @@ class GreenFormer(nn.Module):
             scale_factor=(4.0, 4.0), mode="linear", align_corners=False
         )
 
-    def __call__(self, x: mx.array) -> dict[str, mx.array]:
+    def __call__(self, x: mx.array, *, slim: bool = False) -> dict[str, mx.array]:
         """Forward pass.
 
         Args:
             x: (B, H, W, 4) NHWC — ImageNet-normalized RGB + alpha hint.
+            slim: If True, only return the 4 engine-relevant outputs
+                (alpha_coarse, fg_coarse, alpha_final, fg_final), skipping
+                5 intermediate tensors to save VRAM.
 
         Returns:
-            Dict with keys: alpha_logits, fg_logits, alpha_logits_up, fg_logits_up,
-            alpha_coarse, fg_coarse, delta_logits, alpha_final, fg_final.
-            All tensors in NHWC format.
+            Dict with coarse/final alpha and foreground maps in NHWC.
+            When slim=False (default), also includes intermediate logits.
         """
         # Backbone -> 4 multiscale feature maps in NHWC
         features = self.backbone(x)
@@ -77,6 +79,14 @@ class GreenFormer(nn.Module):
         # Final predictions: additive residual in logit space, then sigmoid
         alpha_final = mx.sigmoid(alpha_logits_up + delta_logits[:, :, :, 0:1])
         fg_final = mx.sigmoid(fg_logits_up + delta_logits[:, :, :, 1:4])
+
+        if slim:
+            return {
+                "alpha_coarse": alpha_coarse,
+                "fg_coarse": fg_coarse,
+                "alpha_final": alpha_final,
+                "fg_final": fg_final,
+            }
 
         return {
             "alpha_logits": alpha_logits,

@@ -124,28 +124,28 @@ Applies only to the non-tiled process_frame() path.
 
 #### Tasks
 
-- [ ] **2a. Audit engine.py:process_frame()** -- identify all numpy/PIL conversions
+- [x] **2a. Audit engine.py:process_frame()** -- identify all numpy/PIL conversions
   - Current flow: uint8 ndarray -> float32 ndarray -> PIL resize -> ndarray -> ImageNet norm -> mx.array
   - Target flow: uint8 ndarray -> mx.array -> mx resize -> ImageNet norm (single conversion)
-- [ ] **2b. MLX-native resize**
+- [x] **2b. MLX-native resize**
   - Replace PIL resize with nn.Upsample(scale_factor=..., mode="linear") or precomputed scale
   - Note: nn.Upsample takes scale factors, not target sizes. Compute scale factor from input/target dims
-- [ ] **2c. MLX-native preprocessing**
+- [x] **2c. MLX-native preprocessing**
   - ImageNet normalization as mx.array ops: (x - mean) / std with broadcast constants
   - Alpha hint concatenation as mx.concatenate
-- [ ] **2d. Final sync only**
+- [x] **2d. Final sync only**
   - Move np.array(result) to the absolute end of process_frame()
   - All postprocessing (sigmoid, clamp, scale to uint8) stays as mx.array ops
-- [ ] **2e. Slim forward mode** (opportunistic)
+- [x] **2e. Slim forward mode** (opportunistic)
   - Add slim=True parameter to GreenFormer.__call__() that skips returning the 5 unused intermediate tensors
   - Only compute/return: alpha_coarse, fg_coarse, alpha_final, fg_final
   - Saves ~25% intermediate VRAM at 2048
 
 #### Acceptance Criteria
 
-- [ ] process_frame() has exactly ONE np.array() call (at return)
-- [ ] No PIL imports in the hot path
-- [ ] Engine integration test passes with same output shapes/dtypes
+- [x] process_frame() has exactly ONE np.array() call (at return)
+- [x] No PIL imports in the hot path
+- [x] Engine integration test passes with same output shapes/dtypes
 
 ---
 
