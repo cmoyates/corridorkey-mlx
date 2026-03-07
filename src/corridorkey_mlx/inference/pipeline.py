@@ -35,6 +35,7 @@ def load_model(
     compile: bool = False,
     shapeless: bool = False,
     fp16: bool = False,
+    backbone_size: int | None = None,
 ) -> GreenFormer:
     """Build GreenFormer and load weights from safetensors checkpoint.
 
@@ -42,19 +43,33 @@ def load_model(
         checkpoint: Path to converted MLX safetensors weights.
         img_size: Input resolution (square). Must match at inference time.
         compile: If True, wrap forward pass with mx.compile for fused execution.
+            Automatically disabled when backbone_size differs from img_size
+            (dual-resolution forward has varying internal shapes).
         shapeless: If True, use shapeless=True with mx.compile. Only safe when
             no shape-dependent logic varies across calls. The Hiera backbone
             uses shape-dependent reshapes, so shapeless is NOT recommended
             unless all inputs share the same spatial dimensions.
         fp16: If True, cast decoder weights to float16 (mixed precision).
             Backbone + refiner stay FP32 for numerical stability.
+        backbone_size: If set, backbone runs at this resolution while refiner
+            runs at img_size. Must be <= img_size and divisible by 4.
     """
-    model = GreenFormer(img_size=img_size)
+    model = GreenFormer(img_size=img_size, backbone_size=backbone_size)
     model.load_checkpoint(checkpoint)
     if fp16:
         _cast_model_fp16(model)
     if compile:
-        model = compile_model(model, shapeless=shapeless)
+        if model._decoupled:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "mx.compile disabled: backbone_size=%d != img_size=%d "
+                "(dual-resolution forward has varying internal shapes)",
+                backbone_size,
+                img_size,
+            )
+        else:
+            model = compile_model(model, shapeless=shapeless)
     return model
 
 

@@ -31,9 +31,18 @@ class GreenFormer(nn.Module):
     Output: dict with coarse/final alpha and foreground maps in NHWC.
     """
 
-    def __init__(self, img_size: int = 512) -> None:
+    def __init__(
+        self, img_size: int = 512, backbone_size: int | None = None
+    ) -> None:
         super().__init__()
-        self.backbone = HieraBackbone(img_size=img_size)
+        self.img_size = img_size
+        self.backbone_size = backbone_size
+
+        # Backbone runs at backbone_size if set, else img_size
+        backbone_res = backbone_size if backbone_size is not None else img_size
+        self._decoupled = backbone_res != img_size
+
+        self.backbone = HieraBackbone(img_size=backbone_res)
         self.alpha_decoder = DecoderHead(BACKBONE_CHANNELS, EMBED_DIM, output_dim=1)
         self.fg_decoder = DecoderHead(BACKBONE_CHANNELS, EMBED_DIM, output_dim=3)
         self.refiner = CNNRefinerModule()
@@ -42,6 +51,22 @@ class GreenFormer(nn.Module):
         self._logit_upsampler = nn.Upsample(
             scale_factor=(4.0, 4.0), mode="linear", align_corners=False
         )
+
+        # Resamplers for decoupled resolution (backbone_size != img_size)
+        if self._decoupled:
+            down_scale = backbone_res / img_size
+            self._backbone_downsampler = nn.Upsample(
+                scale_factor=(down_scale, down_scale),
+                mode="linear",
+                align_corners=False,
+            )
+            # Upsample coarse logits from backbone_size back to img_size
+            up_scale = img_size / backbone_res
+            self._fullres_upsampler = nn.Upsample(
+                scale_factor=(up_scale, up_scale),
+                mode="linear",
+                align_corners=False,
+            )
 
     def __call__(self, x: mx.array, *, slim: bool = False) -> dict[str, mx.array]:
         """Forward pass.
@@ -56,23 +81,35 @@ class GreenFormer(nn.Module):
             Dict with coarse/final alpha and foreground maps in NHWC.
             When slim=False (default), also includes intermediate logits.
         """
+        # Keep full-res input for refiner when resolutions are decoupled
+        x_full = x
+
+        # Downsample to backbone resolution if decoupled
+        if self._decoupled:
+            x = self._backbone_downsampler(x)
+
         # Backbone -> 4 multiscale feature maps in NHWC
         features = self.backbone(x)
 
-        # Decoder heads -> logits at H/4 resolution
-        alpha_logits = self.alpha_decoder(features)  # (B, H/4, W/4, 1)
-        fg_logits = self.fg_decoder(features)  # (B, H/4, W/4, 3)
+        # Decoder heads -> logits at backbone_H/4 resolution
+        alpha_logits = self.alpha_decoder(features)  # (B, bH/4, bW/4, 1)
+        fg_logits = self.fg_decoder(features)  # (B, bH/4, bW/4, 3)
 
-        # Upsample logits to full input resolution (4x from stride-4 decoder)
-        alpha_logits_up = self._logit_upsampler(alpha_logits)  # (B, H, W, 1)
-        fg_logits_up = self._logit_upsampler(fg_logits)  # (B, H, W, 3)
+        # Upsample logits to backbone resolution (4x from stride-4 decoder)
+        alpha_logits_up = self._logit_upsampler(alpha_logits)  # (B, bH, bW, 1)
+        fg_logits_up = self._logit_upsampler(fg_logits)  # (B, bH, bW, 3)
+
+        # If decoupled, upsample coarse logits from backbone_size to full res
+        if self._decoupled:
+            alpha_logits_up = self._fullres_upsampler(alpha_logits_up)
+            fg_logits_up = self._fullres_upsampler(fg_logits_up)
 
         # Coarse predictions via sigmoid
         alpha_coarse = mx.sigmoid(alpha_logits_up)
         fg_coarse = mx.sigmoid(fg_logits_up)
 
-        # Refiner: RGB + coarse predictions -> delta logits
-        rgb = x[:, :, :, :3]  # (B, H, W, 3)
+        # Refiner: full-res RGB + coarse predictions -> delta logits
+        rgb = x_full[:, :, :, :3]  # (B, H, W, 3)
         coarse_pred = mx.concatenate([alpha_coarse, fg_coarse], axis=-1)  # (B, H, W, 4)
         delta_logits = self.refiner(rgb, coarse_pred)  # (B, H, W, 4)
 

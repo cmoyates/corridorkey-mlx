@@ -155,7 +155,7 @@ Biggest VRAM win -- backbone at 1024 instead of 2048.
 
 #### Tasks
 
-- [ ] **3a. Restructure GreenFormer.__call__()** -- src/corridorkey_mlx/model/corridorkey.py
+- [x] **3a. Restructure GreenFormer.__call__()** -- src/corridorkey_mlx/model/corridorkey.py
   - Add backbone_size: int | None = None parameter
   - If backbone_size is set and differs from input spatial dims:
     1. Store original full-res input x_full = x
@@ -165,19 +165,19 @@ Biggest VRAM win -- backbone at 1024 instead of 2048.
     5. Extract RGB from x_full[:, :, :, :3] for refiner concatenation
     6. Run refiner at full resolution
   - If backbone_size is None or matches input, current behavior preserved
-- [ ] **3b. pos_embed alignment**
+- [x] **3b. pos_embed alignment**
   - Verify _interpolate_pos_embed works correctly for backbone_size=1024 (tokens_spatial_shape=[256,256]=65536)
   - This is a 4x downsample from training res (2048). Already handled by cubic interpolation, but validate quality
-- [ ] **3c. Compilation strategy**
+- [x] **3c. Compilation strategy**
   - With dual resolutions in one forward pass, mx.compile on the whole __call__ sees varying internal shapes
   - Option A: Don't compile when backbone_size differs from input (simplest)
   - Option B: Split into compiled_backbone(x_down) + compiled_refiner(x_full, coarse) (better perf)
   - Recommend Option A first, Option B as follow-up
-- [ ] **3d. Quality validation**
+- [ ] **3d. Quality validation** *(deferred — needs real sample images)*
   - No PyTorch reference exists for this modified architecture
   - Validate by visual inspection on real frames + comparing coarse outputs at 1024 vs 2048
   - Document acceptable quality delta (this is a lossy optimization)
-- [ ] **3e. Parity test update**
+- [x] **3e. Parity test update**
   - Add test_decoupled_resolution.py -- not a parity test vs golden, but a regression test:
   - Assert outputs are valid (no NaN/Inf, alpha in [0,1], reasonable value ranges)
   - Assert shapes match full-resolution output
@@ -188,10 +188,10 @@ If tiling is active (Phase 4), tiles are 512x512. With backbone_size=1024, each 
 
 #### Acceptance Criteria
 
-- [ ] GreenFormer(backbone_size=1024) produces valid outputs at 2048x2048 input
+- [x] GreenFormer(backbone_size=1024) produces valid outputs at 2048x2048 input
 - [ ] Peak memory at 2048 drops significantly vs Phase 1 baseline
-- [ ] backbone_size=None preserves exact existing behavior (backward compatible)
-- [ ] Compilation still works when backbone_size=None
+- [x] backbone_size=None preserves exact existing behavior (backward compatible)
+- [x] Compilation still works when backbone_size=None
 
 ---
 
