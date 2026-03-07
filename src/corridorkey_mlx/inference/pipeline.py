@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import mlx.core as mx
+from mlx.utils import tree_map
 
 from corridorkey_mlx.io.image import (
     load_alpha_hint,
@@ -33,6 +34,7 @@ def load_model(
     img_size: int = DEFAULT_IMG_SIZE,
     compile: bool = False,
     shapeless: bool = False,
+    fp16: bool = False,
 ) -> GreenFormer:
     """Build GreenFormer and load weights from safetensors checkpoint.
 
@@ -44,12 +46,34 @@ def load_model(
             no shape-dependent logic varies across calls. The Hiera backbone
             uses shape-dependent reshapes, so shapeless is NOT recommended
             unless all inputs share the same spatial dimensions.
+        fp16: If True, cast decoder weights to float16 (mixed precision).
+            Backbone + refiner stay FP32 for numerical stability.
     """
     model = GreenFormer(img_size=img_size)
     model.load_checkpoint(checkpoint)
+    if fp16:
+        _cast_model_fp16(model)
     if compile:
         model = compile_model(model, shapeless=shapeless)
     return model
+
+
+def _cast_model_fp16(model: GreenFormer) -> None:
+    """Cast decoder parameters to float16, keep backbone + refiner FP32.
+
+    Mixed precision strategy:
+    - Backbone FP32: avoids cumulative drift across 24 Hiera blocks
+    - Decoders FP16: biggest parameter count, safe after sigmoid clamping
+    - Refiner FP32: REFINER_SCALE=10.0 amplifies FP16 rounding errors
+      beyond acceptable tolerance (2.3e-3 max_abs vs 1e-3 target)
+    """
+    def to_fp16(x: mx.array) -> mx.array:
+        return x.astype(mx.float16)
+
+    for submodule in (model.alpha_decoder, model.fg_decoder):
+        submodule.update(tree_map(to_fp16, submodule.parameters()))
+    # materialize FP16 parameters — mx.eval is MLX array materialization
+    mx.eval(model.parameters())  # noqa: S307
 
 
 def compile_model(model: GreenFormer, shapeless: bool = False) -> GreenFormer:

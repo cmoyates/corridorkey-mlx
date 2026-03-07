@@ -91,19 +91,20 @@ Halve memory footprint and boost M-series ALU throughput.
 
 #### Tasks
 
-- [ ] **1a. FP16 weight casting** -- src/corridorkey_mlx/inference/pipeline.py
+- [x] **1a. FP16 weight casting** -- src/corridorkey_mlx/inference/pipeline.py
   - After load_checkpoint(), cast via: model.update(tree_map(lambda x: x.astype(mx.float16), model.parameters()))
   - Cast BEFORE materializing parameters -- lazy graph means FP32 never materializes, saving ~200MB peak
   - Input tensor must also be cast: x = x.astype(mx.float16) before model(x)
-- [ ] **1b. FP16 parity test** -- tests/test_fp16_parity.py
+- [x] **1b. FP16 parity test** -- tests/test_fp16_parity.py
   - Compare FP16 MLX output vs FP32 MLX output (NOT vs PyTorch golden)
   - Tolerance: 1e-3 for final outputs (looser than FP32-vs-PT because FP16 drift + refiner's 10x scale)
   - Test all 4 engine-relevant outputs: alpha_coarse, fg_coarse, alpha_final, fg_final
-- [ ] **1c. Mixed precision fallback**
-  - If full FP16 exceeds tolerance (especially in Hiera's 24 blocks with cumulative drift, or refiner's REFINER_SCALE=10.0 amplifying rounding):
-  - Keep HieraBackbone in FP32, cast only DecoderHead and CNNRefinerModule to FP16
-  - Implementation: selective tree_map on model.alpha_decoder, model.fg_decoder, model.refiner
-- [ ] **1d. Add fp16: bool parameter** to load_model() in pipeline.py
+- [x] **1c. Mixed precision fallback**
+  - Full FP16 exceeded tolerance: backbone drift (2.5e-3 coarse) + refiner 10x scale (1.3e-2 final)
+  - Mixed precision v1 (backbone FP32, decoder+refiner FP16): refiner still exceeded (2.3e-3 final)
+  - Final: backbone + refiner FP32, decoders FP16 — all outputs within 1e-3
+  - Implementation: selective tree_map on model.alpha_decoder, model.fg_decoder only
+- [x] **1d. Add fp16: bool parameter** to load_model() in pipeline.py
 
 #### Key Risk
 
@@ -111,9 +112,9 @@ GroupNorm with pytorch_compatible=True in the refiner: variance computation at F
 
 #### Acceptance Criteria
 
-- [ ] FP16 parity test passes at 1e-3 tolerance
-- [ ] Peak memory at 512 drops ~40-50% vs FP32 baseline
-- [ ] Existing FP32 parity tests unaffected (FP16 is opt-in)
+- [x] FP16 parity test passes at 1e-3 tolerance
+- [ ] Peak memory at 512 drops ~40-50% vs FP32 baseline (decoders-only FP16 = ~20% expected)
+- [x] Existing FP32 parity tests unaffected (FP16 is opt-in)
 
 ---
 
