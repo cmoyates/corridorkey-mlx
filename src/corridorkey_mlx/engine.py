@@ -16,6 +16,7 @@ import mlx.nn as nn
 import numpy as np
 
 from corridorkey_mlx.inference.pipeline import load_model
+from corridorkey_mlx.inference.tiling import tiled_inference
 
 if TYPE_CHECKING:
     from corridorkey_mlx.model.corridorkey import GreenFormer
@@ -42,7 +43,17 @@ class CorridorKeyMLXEngine:
         use_refiner: If True, return refined alpha/fg. If False, return
             coarse predictions (skips refiner in postprocessing, not forward pass).
         compile: If True, wrap model forward with ``mx.compile`` for faster
-            repeated inference at the same resolution.
+            repeated inference at the same resolution. Auto-disabled when
+            backbone_size differs from img_size.
+        fp16: If True, cast decoder weights to float16 (mixed precision).
+            Backbone + refiner stay FP32 for numerical stability.
+        backbone_size: Backbone runs at this resolution while refiner
+            runs at img_size. None = same as img_size. Must be <= img_size
+            and divisible by 4 (patch stride).
+        tile_size: If set, split input into overlapping tiles of this size.
+            None = no tiling (single-shot inference). Must be divisible by 4.
+        tile_overlap: Overlap in pixels between adjacent tiles.
+            Only used when tile_size is set.
 
     Example::
 
@@ -66,6 +77,10 @@ class CorridorKeyMLXEngine:
         img_size: int = PRODUCTION_IMG_SIZE,
         use_refiner: bool = True,
         compile: bool = True,
+        fp16: bool = True,
+        backbone_size: int | None = None,
+        tile_size: int | None = None,
+        tile_overlap: int = 96,
     ) -> None:
         checkpoint = Path(checkpoint_path)
         if not checkpoint.exists():
@@ -75,9 +90,40 @@ class CorridorKeyMLXEngine:
         if device is not None:
             logger.info("device=%r ignored on MLX (unified memory)", device)
 
+        # -- parameter validation --
+        _validate_engine_params(img_size, backbone_size, tile_size, tile_overlap)
+
+        # Auto-disable compile when backbone_size differs from img_size
+        effective_compile = compile
+        if compile and backbone_size is not None and backbone_size != img_size:
+            logger.warning(
+                "mx.compile disabled: backbone_size=%d != img_size=%d "
+                "(dual-resolution forward has varying internal shapes)",
+                backbone_size,
+                img_size,
+            )
+            effective_compile = False
+
         self._img_size = img_size
         self._use_refiner = use_refiner
-        self._model: GreenFormer = load_model(checkpoint, img_size=img_size, compile=compile)
+        self._tile_size = tile_size
+        self._tile_overlap = tile_overlap
+
+        # Memory safety rail: cap MLX at 80% of system memory
+        _set_memory_limit_safety_rail()
+
+        # When tiling, model runs at tile_size; backbone_size ignored per design
+        # (tiles are already small, downsampling further is wasteful)
+        model_res = tile_size if tile_size is not None else img_size
+        model_backbone_size = None if tile_size is not None else backbone_size
+
+        self._model: GreenFormer = load_model(
+            checkpoint,
+            img_size=model_res,
+            compile=effective_compile,
+            fp16=fp16,
+            backbone_size=model_backbone_size,
+        )
 
     def process_frame(
         self,
@@ -142,25 +188,41 @@ class CorridorKeyMLXEngine:
         rgb_norm = (rgb_mx - _IMAGENET_MEAN) / _IMAGENET_STD
         x = mx.concatenate([rgb_norm, mask_mx], axis=-1)[None]  # (1, H, W, 4)
 
-        # -- forward (slim=True skips 5 unused intermediate tensors) --
-        outputs = self._model(x, slim=True)
-
-        # -- select coarse vs refined (MLX ops) --
-        alpha_coarse = outputs["alpha_coarse"]
-        fg_coarse = outputs["fg_coarse"]
-        alpha_refined = outputs["alpha_final"]
-        fg_refined = outputs["fg_final"]
-
-        if not self._use_refiner or refiner_scale == 0.0:
-            alpha_out = alpha_coarse
-            fg_out = fg_coarse
-        elif refiner_scale == 1.0:
-            alpha_out = alpha_refined
-            fg_out = fg_refined
+        # -- forward: tiled or single-shot --
+        if self._tile_size is not None:
+            # Tiled path: full image stays as numpy, tiles sent to GPU on demand
+            # mx.eval is MLX array materialization, not Python eval
+            mx.eval(x)  # noqa: S307
+            x_np = np.array(x)
+            outputs = tiled_inference(
+                self._model,
+                x_np,
+                tile_size=self._tile_size,
+                overlap=self._tile_overlap,
+            )
+            # Tiled inference only returns alpha_final/fg_final
+            alpha_out = outputs["alpha_final"]
+            fg_out = outputs["fg_final"]
         else:
-            s = refiner_scale
-            alpha_out = alpha_coarse * (1.0 - s) + alpha_refined * s
-            fg_out = fg_coarse * (1.0 - s) + fg_refined * s
+            # Single-shot path (slim=True skips 5 unused intermediate tensors)
+            outputs = self._model(x, slim=True)
+
+            # -- select coarse vs refined (MLX ops) --
+            alpha_coarse = outputs["alpha_coarse"]
+            fg_coarse = outputs["fg_coarse"]
+            alpha_refined = outputs["alpha_final"]
+            fg_refined = outputs["fg_final"]
+
+            if not self._use_refiner or refiner_scale == 0.0:
+                alpha_out = alpha_coarse
+                fg_out = fg_coarse
+            elif refiner_scale == 1.0:
+                alpha_out = alpha_refined
+                fg_out = fg_refined
+            else:
+                s = refiner_scale
+                alpha_out = alpha_coarse * (1.0 - s) + alpha_refined * s
+                fg_out = fg_coarse * (1.0 - s) + fg_refined * s
 
         # -- resize back to original (MLX-native) --
         if needs_resize:
@@ -244,3 +306,55 @@ def _validate_mask(mask: np.ndarray) -> None:
         return
     msg = f"mask must be (H, W) or (H, W, 1), got {mask.shape}"
     raise ValueError(msg)
+
+
+PATCH_STRIDE = 4
+MEMORY_LIMIT_FRACTION = 0.8
+
+
+def _set_memory_limit_safety_rail() -> None:
+    """Set MLX memory limit to 80% of system memory if detectable."""
+    try:
+        import subprocess
+
+        result = subprocess.run(  # noqa: S603, S607
+            ["sysctl", "-n", "hw.memsize"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        total_bytes = int(result.stdout.strip())
+        limit = int(total_bytes * MEMORY_LIMIT_FRACTION)
+        mx.set_memory_limit(limit)
+        logger.debug(
+            "MLX memory limit set to %.0f MB (%.0f%% of %d MB)",
+            limit / 1e6,
+            MEMORY_LIMIT_FRACTION * 100,
+            total_bytes / 1e6,
+        )
+    except Exception:
+        logger.debug("Could not detect system memory; skipping memory limit")
+
+
+def _validate_engine_params(
+    img_size: int,
+    backbone_size: int | None,
+    tile_size: int | None,
+    tile_overlap: int,
+) -> None:
+    """Validate engine constructor parameters."""
+    if backbone_size is not None:
+        if backbone_size % PATCH_STRIDE != 0:
+            msg = f"backbone_size ({backbone_size}) must be divisible by {PATCH_STRIDE}"
+            raise ValueError(msg)
+        if backbone_size > img_size:
+            msg = f"backbone_size ({backbone_size}) must be <= img_size ({img_size})"
+            raise ValueError(msg)
+
+    if tile_size is not None:
+        if tile_size % PATCH_STRIDE != 0:
+            msg = f"tile_size ({tile_size}) must be divisible by {PATCH_STRIDE}"
+            raise ValueError(msg)
+        if tile_overlap >= tile_size:
+            msg = f"tile_overlap ({tile_overlap}) must be < tile_size ({tile_size})"
+            raise ValueError(msg)

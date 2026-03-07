@@ -124,6 +124,30 @@ def main() -> None:
         default=True,
         help="Use mx.compile (default: True)",
     )
+    parser.add_argument(
+        "--fp16",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Mixed precision: decoder FP16 (default: True)",
+    )
+    parser.add_argument(
+        "--backbone-size",
+        type=int,
+        default=None,
+        help="Backbone resolution (None = same as img_size)",
+    )
+    parser.add_argument(
+        "--tile-size",
+        type=int,
+        default=None,
+        help="Tile size for tiled inference (None = no tiling)",
+    )
+    parser.add_argument(
+        "--tile-overlap",
+        type=int,
+        default=96,
+        help="Tile overlap in pixels (default: 96)",
+    )
     args = parser.parse_args()
 
     # -- validate checkpoint --
@@ -157,12 +181,20 @@ def main() -> None:
     print(f"Input mask: {mask.shape} {mask.dtype}")
 
     # -- load engine --
-    print(f"Loading engine (img_size={args.img_size}, compile={args.compile})...")
+    print(
+        f"Loading engine (img_size={args.img_size}, compile={args.compile}, "
+        f"fp16={args.fp16}, backbone_size={args.backbone_size}, "
+        f"tile_size={args.tile_size}, tile_overlap={args.tile_overlap})..."
+    )
     try:
         engine = CorridorKeyMLXEngine(
             checkpoint_path=args.checkpoint,
             img_size=args.img_size,
             compile=args.compile,
+            fp16=args.fp16,
+            backbone_size=args.backbone_size,
+            tile_size=args.tile_size,
+            tile_overlap=args.tile_overlap,
         )
     except Exception as exc:
         print(f"ERROR loading engine: {exc}")

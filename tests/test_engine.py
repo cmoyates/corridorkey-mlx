@@ -7,6 +7,7 @@ import pytest
 
 from corridorkey_mlx.engine import (
     CorridorKeyMLXEngine,
+    _validate_engine_params,
     _validate_image,
     _validate_mask,
 )
@@ -163,3 +164,131 @@ def test_smoke_2048_full() -> None:
         assert not np.isinf(arr).any(), f"{key} contains Inf"
 
     assert result["alpha"].min() != result["alpha"].max(), "alpha is constant"
+
+
+# ---------------------------------------------------------------------------
+# Parameter validation (no checkpoint needed)
+# ---------------------------------------------------------------------------
+
+
+class TestValidateEngineParams:
+    def test_backbone_size_not_divisible_by_4(self) -> None:
+        with pytest.raises(ValueError, match="divisible by 4"):
+            _validate_engine_params(512, backbone_size=511, tile_size=None, tile_overlap=96)
+
+    def test_backbone_size_exceeds_img_size(self) -> None:
+        with pytest.raises(ValueError, match="<= img_size"):
+            _validate_engine_params(512, backbone_size=1024, tile_size=None, tile_overlap=96)
+
+    def test_tile_size_not_divisible_by_4(self) -> None:
+        with pytest.raises(ValueError, match="divisible by 4"):
+            _validate_engine_params(512, backbone_size=None, tile_size=511, tile_overlap=96)
+
+    def test_tile_overlap_exceeds_tile_size(self) -> None:
+        with pytest.raises(ValueError, match="< tile_size"):
+            _validate_engine_params(512, backbone_size=None, tile_size=256, tile_overlap=256)
+
+    def test_valid_params_accepted(self) -> None:
+        _validate_engine_params(2048, backbone_size=1024, tile_size=512, tile_overlap=96)
+
+    def test_none_params_accepted(self) -> None:
+        _validate_engine_params(512, backbone_size=None, tile_size=None, tile_overlap=96)
+
+
+# ---------------------------------------------------------------------------
+# Engine new params (requires checkpoint)
+# ---------------------------------------------------------------------------
+
+
+@has_checkpoint
+class TestEngineFp16:
+    @pytest.fixture(scope="class")
+    def engine_fp16(self) -> CorridorKeyMLXEngine:
+        return CorridorKeyMLXEngine(
+            checkpoint_path=MLX_CHECKPOINT_PATH,
+            img_size=512,
+            compile=False,
+            fp16=True,
+        )
+
+    @pytest.fixture(scope="class")
+    def engine_fp32(self) -> CorridorKeyMLXEngine:
+        return CorridorKeyMLXEngine(
+            checkpoint_path=MLX_CHECKPOINT_PATH,
+            img_size=512,
+            compile=False,
+            fp16=False,
+        )
+
+    def test_fp16_produces_valid_output(self, engine_fp16: CorridorKeyMLXEngine) -> None:
+        rng = np.random.default_rng(42)
+        image = rng.integers(0, 256, (64, 64, 3), dtype=np.uint8)
+        mask = rng.integers(0, 256, (64, 64), dtype=np.uint8)
+        result = engine_fp16.process_frame(image, mask)
+        assert result["alpha"].shape == (64, 64)
+        assert result["alpha"].dtype == np.uint8
+        assert not np.isnan(result["alpha"]).any()
+
+    def test_fp32_backward_compat(self, engine_fp32: CorridorKeyMLXEngine) -> None:
+        rng = np.random.default_rng(42)
+        image = rng.integers(0, 256, (64, 64, 3), dtype=np.uint8)
+        mask = rng.integers(0, 256, (64, 64), dtype=np.uint8)
+        result = engine_fp32.process_frame(image, mask)
+        assert set(result.keys()) == {"alpha", "fg", "comp", "processed"}
+
+
+@has_checkpoint
+class TestEngineBackboneSize:
+    def test_backbone_size_produces_valid_output(self) -> None:
+        engine = CorridorKeyMLXEngine(
+            checkpoint_path=MLX_CHECKPOINT_PATH,
+            img_size=512,
+            compile=False,
+            fp16=False,
+            backbone_size=256,
+        )
+        rng = np.random.default_rng(42)
+        image = rng.integers(0, 256, (64, 64, 3), dtype=np.uint8)
+        mask = rng.integers(0, 256, (64, 64), dtype=np.uint8)
+        result = engine.process_frame(image, mask)
+        assert result["alpha"].shape == (64, 64)
+        assert not np.isnan(result["alpha"]).any()
+
+
+@has_checkpoint
+class TestEngineTiling:
+    @pytest.fixture(scope="class")
+    def engine_tiled(self) -> CorridorKeyMLXEngine:
+        return CorridorKeyMLXEngine(
+            checkpoint_path=MLX_CHECKPOINT_PATH,
+            img_size=512,
+            compile=False,
+            fp16=False,
+            tile_size=256,
+            tile_overlap=64,
+        )
+
+    def test_tiled_produces_valid_output(self, engine_tiled: CorridorKeyMLXEngine) -> None:
+        rng = np.random.default_rng(42)
+        image = rng.integers(0, 256, (512, 512, 3), dtype=np.uint8)
+        mask = rng.integers(0, 256, (512, 512), dtype=np.uint8)
+        result = engine_tiled.process_frame(image, mask)
+        assert result["alpha"].shape == (512, 512)
+        assert result["fg"].shape == (512, 512, 3)
+        assert result["alpha"].dtype == np.uint8
+        assert not np.isnan(result["alpha"]).any()
+
+    def test_tiled_output_keys(self, engine_tiled: CorridorKeyMLXEngine) -> None:
+        rng = np.random.default_rng(42)
+        image = rng.integers(0, 256, (512, 512, 3), dtype=np.uint8)
+        mask = rng.integers(0, 256, (512, 512), dtype=np.uint8)
+        result = engine_tiled.process_frame(image, mask)
+        assert set(result.keys()) == {"alpha", "fg", "comp", "processed"}
+
+    def test_tiled_small_image_no_tiling(self, engine_tiled: CorridorKeyMLXEngine) -> None:
+        """Image smaller than tile_size should still work (single tile)."""
+        rng = np.random.default_rng(42)
+        image = rng.integers(0, 256, (64, 64, 3), dtype=np.uint8)
+        mask = rng.integers(0, 256, (64, 64), dtype=np.uint8)
+        result = engine_tiled.process_frame(image, mask)
+        assert result["alpha"].shape == (64, 64)

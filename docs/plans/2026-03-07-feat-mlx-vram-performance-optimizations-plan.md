@@ -235,37 +235,37 @@ Wire optimizations into CorridorKeyMLXEngine.
 
 #### Tasks
 
-- [ ] **5a. New engine parameters** -- src/corridorkey_mlx/engine.py
+- [x] **5a. New engine parameters** -- src/corridorkey_mlx/engine.py
   - fp16=True (NEW, default True)
   - backbone_size=1024 (NEW, None = same as img_size)
   - tile_size=512 (NEW, None = no tiling)
   - tile_overlap=96 (NEW, only used when tile_size set)
-- [ ] **5b. Parameter validation**
+- [x] **5b. Parameter validation**
   - backbone_size must be None or divisible by patch_stride (4)
   - backbone_size must be <= img_size
   - tile_overlap must be < tile_size
   - tile_size must be divisible by patch_stride (4)
   - If compile=True and backbone_size != img_size and backbone_size is not None: disable compile with warning (Phase 3 Option A)
-- [ ] **5c. Tiling integration in process_frame()**
+- [x] **5c. Tiling integration in process_frame()**
   - If tile_size is set: route to tiled_inference() instead of direct model(x)
   - Preprocessing still happens once (full image), then tiles are sliced from the preprocessed numpy array
   - Tiling trigger: tile_size is not None (explicit opt-in)
-- [ ] **5d. Memory limit safety rail**
+- [x] **5d. Memory limit safety rail**
   - On init: mx.set_memory_limit(int(0.8 * total_unified_memory)) if detectable
   - Fallback: skip if API unavailable
-- [ ] **5e. Benchmark matrix** -- scripts/bench_mlx.py
+- [x] **5e. Benchmark matrix** -- scripts/bench_mlx.py
   - Add configurations: {fp16, fp32} x {backbone_size: None, 1024} x {tiled, non-tiled} at 2048
   - Target: <6GB active Metal memory for fp16=True, backbone_size=1024, tiled
   - Include 512/1024 as regression checks
-- [ ] **5f. Update scripts/smoke_2048.py**
+- [x] **5f. Update scripts/smoke_2048.py**
   - Exercise all new engine parameters
   - Report memory per configuration
 
 #### Acceptance Criteria
 
-- [ ] Engine accepts all new parameters without breaking existing API (defaults match current behavior)
-- [ ] fp16=False, backbone_size=None, tile_size=None produces identical output to current engine
-- [ ] Benchmark matrix runs and produces comparison table
+- [x] Engine accepts all new parameters without breaking existing API (defaults match current behavior)
+- [x] fp16=False, backbone_size=None, tile_size=None produces identical output to current engine
+- [x] Benchmark matrix runs and produces comparison table
 - [ ] <6GB active memory target achieved (or documented why not)
 
 ---

@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 import mlx.core as mx
+import numpy as np
 from rich.console import Console
 from rich.table import Table
 
@@ -132,6 +133,71 @@ def bench_resolution(
     return results
 
 
+def bench_engine_config(
+    checkpoint: Path,
+    img_size: int,
+    fp16: bool,
+    backbone_size: int | None,
+    tile_size: int | None,
+    tile_overlap: int,
+    bench_runs: int,
+) -> dict[str, object]:
+    """Benchmark a specific engine configuration via process_frame()."""
+    from corridorkey_mlx import CorridorKeyMLXEngine
+
+    label = f"{img_size} fp16={fp16} bb={backbone_size or img_size} tile={tile_size or 'none'}"
+
+    reset_peak()
+    rng = np.random.default_rng(42)
+    image = rng.integers(0, 256, (img_size, img_size, 3), dtype=np.uint8)
+    mask = rng.integers(0, 256, (img_size, img_size), dtype=np.uint8)
+
+    try:
+        engine = CorridorKeyMLXEngine(
+            checkpoint_path=checkpoint,
+            img_size=img_size,
+            compile=True,
+            fp16=fp16,
+            backbone_size=backbone_size,
+            tile_size=tile_size,
+            tile_overlap=tile_overlap,
+        )
+
+        # Warmup
+        engine.process_frame(image, mask)
+        reset_peak()
+
+        # Bench
+        times: list[float] = []
+        for _ in range(bench_runs):
+            import time
+
+            start = time.perf_counter()
+            engine.process_frame(image, mask)
+            times.append((time.perf_counter() - start) * 1000.0)
+
+        mem = memory_snapshot()
+        times.sort()
+        median_ms = times[len(times) // 2]
+
+        return {
+            "config": label,
+            "median_ms": round(median_ms, 1),
+            "min_ms": round(min(times), 1),
+            "peak_mb": round(mem.peak_mb, 1),
+            "active_mb": round(mem.active_mb, 1),
+        }
+    except Exception as e:
+        return {
+            "config": label,
+            "median_ms": "FAIL",
+            "min_ms": "FAIL",
+            "peak_mb": "FAIL",
+            "active_mb": "FAIL",
+            "error": str(e),
+        }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Benchmark MLX CorridorKey inference")
     parser.add_argument(
@@ -150,12 +216,74 @@ def main() -> None:
     parser.add_argument("--warmup-runs", type=int, default=DEFAULT_WARMUP_RUNS)
     parser.add_argument("--bench-runs", type=int, default=DEFAULT_BENCH_RUNS)
     parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument(
+        "--matrix",
+        action="store_true",
+        help="Run engine config matrix at 2048 (fp16/fp32 x backbone x tiled)",
+    )
     args = parser.parse_args()
 
     ckpt = args.checkpoint if args.checkpoint.exists() else None
     weights_label = str(args.checkpoint) if ckpt else "random (no checkpoint)"
     console.print("[bold]CorridorKey MLX Benchmark[/bold]")
     console.print(f"  Weights: {weights_label}")
+
+    if args.matrix:
+        if not ckpt:
+            console.print("[red]--matrix requires a real checkpoint[/red]")
+            sys.exit(1)
+
+        console.print("  Mode: engine configuration matrix")
+        console.print()
+
+        configs = [
+            # Regression checks at smaller resolutions
+            {"img_size": 512, "fp16": False, "backbone_size": None, "tile_size": None},
+            {"img_size": 512, "fp16": True, "backbone_size": None, "tile_size": None},
+            {"img_size": 1024, "fp16": False, "backbone_size": None, "tile_size": None},
+            {"img_size": 1024, "fp16": True, "backbone_size": None, "tile_size": None},
+            # 2048 matrix: {fp16, fp32} x {backbone: None, 1024} x {tiled, non-tiled}
+            {"img_size": 2048, "fp16": False, "backbone_size": None, "tile_size": None},
+            {"img_size": 2048, "fp16": True, "backbone_size": None, "tile_size": None},
+            {"img_size": 2048, "fp16": False, "backbone_size": 1024, "tile_size": None},
+            {"img_size": 2048, "fp16": True, "backbone_size": 1024, "tile_size": None},
+            {"img_size": 2048, "fp16": False, "backbone_size": None, "tile_size": 512},
+            {"img_size": 2048, "fp16": True, "backbone_size": None, "tile_size": 512},
+        ]
+
+        matrix_results = []
+        for cfg in configs:
+            console.print(f"  Benchmarking {cfg}...")
+            result = bench_engine_config(
+                checkpoint=ckpt,
+                img_size=cfg["img_size"],
+                fp16=cfg["fp16"],
+                backbone_size=cfg["backbone_size"],
+                tile_size=cfg["tile_size"],
+                tile_overlap=96,
+                bench_runs=args.bench_runs,
+            )
+            matrix_results.append(result)
+
+        table = Table(title="Engine Configuration Matrix")
+        table.add_column("Config", justify="left")
+        table.add_column("Median ms", justify="right")
+        table.add_column("Min ms", justify="right")
+        table.add_column("Peak MB", justify="right")
+        table.add_column("Active MB", justify="right")
+
+        for r in matrix_results:
+            table.add_row(
+                str(r["config"]),
+                str(r.get("median_ms", "")),
+                str(r.get("min_ms", "")),
+                str(r.get("peak_mb", "")),
+                str(r.get("active_mb", "")),
+            )
+
+        console.print(table)
+        return
+
     console.print(f"  Resolutions: {args.resolutions}")
     console.print(
         f"  Warmup: {args.warmup_runs}, Bench: {args.bench_runs}, Batch: {args.batch_size}"

@@ -82,6 +82,7 @@ def _cast_model_fp16(model: GreenFormer) -> None:
     - Refiner FP32: REFINER_SCALE=10.0 amplifies FP16 rounding errors
       beyond acceptable tolerance (2.3e-3 max_abs vs 1e-3 target)
     """
+
     def to_fp16(x: mx.array) -> mx.array:
         return x.astype(mx.float16)
 

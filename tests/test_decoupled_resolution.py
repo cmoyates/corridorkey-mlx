@@ -53,9 +53,7 @@ class TestDecoupledStructure:
         model = GreenFormer(img_size=IMG_SIZE, backbone_size=IMG_SIZE)
         assert model._decoupled is False
 
-    def test_output_shapes_match_full_res(
-        self, decoupled_model: GreenFormer
-    ) -> None:
+    def test_output_shapes_match_full_res(self, decoupled_model: GreenFormer) -> None:
         """Decoupled outputs must have same spatial dims as full-res input."""
         rng = np.random.default_rng(42)
         x = mx.array(rng.standard_normal((1, IMG_SIZE, IMG_SIZE, 4)).astype(np.float32))
@@ -75,9 +73,7 @@ class TestDecoupledStructure:
         # mx.eval is MLX array materialization, not Python eval
         mx.eval(outputs)  # noqa: S307
 
-        assert set(outputs.keys()) == {
-            "alpha_coarse", "fg_coarse", "alpha_final", "fg_final"
-        }
+        assert set(outputs.keys()) == {"alpha_coarse", "fg_coarse", "alpha_final", "fg_final"}
         assert outputs["alpha_final"].shape == (1, IMG_SIZE, IMG_SIZE, 1)
 
     def test_no_nan_inf(self, decoupled_model: GreenFormer) -> None:
@@ -114,11 +110,15 @@ class TestDecoupledStructure:
         mx.eval(outputs)  # noqa: S307
 
         expected_keys = {
-            "alpha_logits", "fg_logits",
-            "alpha_logits_up", "fg_logits_up",
-            "alpha_coarse", "fg_coarse",
+            "alpha_logits",
+            "fg_logits",
+            "alpha_logits_up",
+            "fg_logits_up",
+            "alpha_coarse",
+            "fg_coarse",
             "delta_logits",
-            "alpha_final", "fg_final",
+            "alpha_final",
+            "fg_final",
         }
         assert set(outputs.keys()) == expected_keys
 

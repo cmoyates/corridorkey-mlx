@@ -31,9 +31,7 @@ class GreenFormer(nn.Module):
     Output: dict with coarse/final alpha and foreground maps in NHWC.
     """
 
-    def __init__(
-        self, img_size: int = 512, backbone_size: int | None = None
-    ) -> None:
+    def __init__(self, img_size: int = 512, backbone_size: int | None = None) -> None:
         super().__init__()
         self.img_size = img_size
         self.backbone_size = backbone_size
