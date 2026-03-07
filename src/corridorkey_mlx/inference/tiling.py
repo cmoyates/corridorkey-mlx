@@ -2,10 +2,18 @@
 
 Splits large images into overlapping tiles, runs model on each tile,
 then blends results using linear ramp weights in the overlap region.
+
+Design decision: tiling ignores ``backbone_size``. When tiling is active,
+each tile runs through the model at ``tile_size`` resolution. The
+``backbone_size`` decoupling (Phase 3) is not applied per-tile because
+tiles are already small (e.g. 512x512) — downsampling them further would
+be wasteful and degrade quality. backbone_size is intended for non-tiled
+full-resolution inference only.
 """
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 import mlx.core as mx
@@ -14,8 +22,10 @@ import numpy as np
 if TYPE_CHECKING:
     from corridorkey_mlx.model.corridorkey import GreenFormer
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_TILE_SIZE = 512
-DEFAULT_OVERLAP = 64
+DEFAULT_OVERLAP = 96
 
 
 def _compute_tile_coords(
@@ -87,17 +97,24 @@ def _make_blend_weights_2d(
 
 def tiled_inference(
     model: GreenFormer,
-    x: mx.array,
+    x: np.ndarray,
     tile_size: int = DEFAULT_TILE_SIZE,
     overlap: int = DEFAULT_OVERLAP,
 ) -> dict[str, mx.array]:
     """Run model on overlapping tiles and blend the results.
 
+    The full image stays as a numpy array on CPU. Only individual tile
+    slices are converted to ``mx.array`` right before model inference,
+    keeping GPU memory bounded to a single tile at a time.
+
+    Note: ``backbone_size`` is ignored during tiling — each tile runs at
+    ``tile_size`` resolution. See module docstring for rationale.
+
     Args:
         model: Loaded GreenFormer (must accept tile_size x tile_size input).
-        x: Full-resolution input (1, H, W, 4) NHWC.
+        x: Full-resolution input as **numpy** array, ``(1, H, W, 4)`` NHWC float32.
         tile_size: Size of each square tile. Must match model.backbone.img_size.
-        overlap: Overlap in pixels between adjacent tiles.
+        overlap: Overlap in pixels between adjacent tiles (default 96).
 
     Returns:
         Dict with 'alpha_final' and 'fg_final' blended at full resolution.
@@ -110,52 +127,73 @@ def tiled_inference(
 
     # If image fits in one tile, just run normally
     if full_h <= tile_size and full_w <= tile_size:
-        return model(x)
+        tile_mx = mx.array(x)
+        result = model(tile_mx)
+        # NOTE: mx.eval is MLX array materialization, not Python eval()
+        mx.eval(result["alpha_final"], result["fg_final"])  # noqa: S307
+        return result
 
     y_coords = _compute_tile_coords(full_h, tile_size, overlap)
     x_coords = _compute_tile_coords(full_w, tile_size, overlap)
 
-    # Accumulators for weighted blending (numpy for simplicity)
+    # Aggressive cache policy: no speculative caching during tiling
+    original_cache_limit = mx.get_cache_memory()
+    mx.set_cache_limit(0)
+
+    # Accumulators for weighted blending (numpy — stays on CPU)
     alpha_accum = np.zeros((full_h, full_w, 1), dtype=np.float32)
     fg_accum = np.zeros((full_h, full_w, 3), dtype=np.float32)
     weight_accum = np.zeros((full_h, full_w, 1), dtype=np.float32)
 
-    for yi, (y_start, y_end) in enumerate(y_coords):
-        for xi, (x_start, x_end) in enumerate(x_coords):
-            tile = x[:, y_start:y_end, x_start:x_end, :]
+    try:
+        for yi, (y_start, y_end) in enumerate(y_coords):
+            for xi, (x_start, x_end) in enumerate(x_coords):
+                # Lazy slice: only this tile goes to GPU
+                tile_np = x[:, y_start:y_end, x_start:x_end, :]
 
-            # Pad to tile_size if needed (edge tiles may be smaller)
-            pad_h = tile_size - (y_end - y_start)
-            pad_w = tile_size - (x_end - x_start)
-            if pad_h > 0 or pad_w > 0:
-                tile = mx.pad(tile, [(0, 0), (0, pad_h), (0, pad_w), (0, 0)])
+                # Pad to tile_size if needed (edge tiles may be smaller)
+                pad_h = tile_size - (y_end - y_start)
+                pad_w = tile_size - (x_end - x_start)
+                if pad_h > 0 or pad_w > 0:
+                    tile_np = np.pad(
+                        tile_np,
+                        [(0, 0), (0, pad_h), (0, pad_w), (0, 0)],
+                    )
 
-            out = model(tile)
-            # NOTE: mx.eval is MLX array materialization, not Python eval()
-            mx.eval(out)  # noqa: S307
+                tile_mx = mx.array(tile_np)
+                out = model(tile_mx)
+                # NOTE: mx.eval is MLX array materialization, not Python eval()
+                mx.eval(out["alpha_final"], out["fg_final"])  # noqa: S307
 
-            alpha_tile = np.array(out["alpha_final"][0])  # (tile_h, tile_w, 1)
-            fg_tile = np.array(out["fg_final"][0])  # (tile_h, tile_w, 3)
+                alpha_tile = np.array(out["alpha_final"][0])  # (tile_h, tile_w, 1)
+                fg_tile = np.array(out["fg_final"][0])  # (tile_h, tile_w, 3)
 
-            # Crop padding
-            actual_h = y_end - y_start
-            actual_w = x_end - x_start
-            alpha_tile = alpha_tile[:actual_h, :actual_w, :]
-            fg_tile = fg_tile[:actual_h, :actual_w, :]
+                # Release GPU memory for this tile immediately
+                del tile_mx, out
+                mx.clear_cache()
 
-            # Blend weights
-            position = (
-                yi > 0,  # has top neighbor
-                yi < len(y_coords) - 1,  # has bottom neighbor
-                xi > 0,  # has left neighbor
-                xi < len(x_coords) - 1,  # has right neighbor
-            )
-            w = _make_blend_weights_2d(actual_h, actual_w, overlap, position)
-            w3d = w[:, :, None]  # (H, W, 1)
+                # Crop padding
+                actual_h = y_end - y_start
+                actual_w = x_end - x_start
+                alpha_tile = alpha_tile[:actual_h, :actual_w, :]
+                fg_tile = fg_tile[:actual_h, :actual_w, :]
 
-            alpha_accum[y_start:y_end, x_start:x_end, :] += alpha_tile * w3d
-            fg_accum[y_start:y_end, x_start:x_end, :] += fg_tile * w3d
-            weight_accum[y_start:y_end, x_start:x_end, :] += w3d
+                # Blend weights
+                position = (
+                    yi > 0,  # has top neighbor
+                    yi < len(y_coords) - 1,  # has bottom neighbor
+                    xi > 0,  # has left neighbor
+                    xi < len(x_coords) - 1,  # has right neighbor
+                )
+                w = _make_blend_weights_2d(actual_h, actual_w, overlap, position)
+                w3d = w[:, :, None]  # (H, W, 1)
+
+                alpha_accum[y_start:y_end, x_start:x_end, :] += alpha_tile * w3d
+                fg_accum[y_start:y_end, x_start:x_end, :] += fg_tile * w3d
+                weight_accum[y_start:y_end, x_start:x_end, :] += w3d
+    finally:
+        # Restore original cache limit
+        mx.set_cache_limit(original_cache_limit)
 
     # Normalize by accumulated weights
     weight_accum = np.maximum(weight_accum, 1e-8)

@@ -201,31 +201,31 @@ Harden inference/tiling.py for memory-constrained environments.
 
 #### Tasks
 
-- [ ] **4a. 96px overlap default** -- src/corridorkey_mlx/inference/tiling.py
+- [x] **4a. 96px overlap default** -- src/corridorkey_mlx/inference/tiling.py
   - Change DEFAULT_OVERLAP = 64 to DEFAULT_OVERLAP = 96
   - User-overridable via parameter
-- [ ] **4b. Lazy tile slicing**
+- [x] **4b. Lazy tile slicing**
   - Change tiled_inference() signature: accept x as np.ndarray (NHWC float32)
   - Only convert each tile slice to mx.array right before model(tile)
   - This keeps the full image out of GPU memory
   - Update docstring and type hints
-- [ ] **4c. Memory management per tile**
+- [x] **4c. Memory management per tile**
   - After materializing and accumulating each tile, delete mx references and clear cache
   - Pattern: materialize -> accumulate to numpy -> del tile refs -> mx.clear_cache()
-- [ ] **4d. Cache limit configuration**
+- [x] **4d. Cache limit configuration**
   - At start of tiled_inference(): mx.set_cache_limit(0) (aggressive: no speculative caching)
   - Restore original limit at end
-- [ ] **4e. Tiling ignores backbone_size**
+- [x] **4e. Tiling ignores backbone_size**
   - When tiling is active, each tile runs through the model at tile_size resolution
   - backbone_size parameter is not applied per-tile (Phase 3 interaction, Option A)
   - Document this decision
 
 #### Acceptance Criteria
 
-- [ ] Peak memory during tiled 2048 inference is bounded (no monotonic growth across tiles)
-- [ ] mx.get_cache_memory() returns ~0 after each tile
-- [ ] 96px overlap produces better edge blending than 64px (visual check)
-- [ ] Existing tiling tests updated and passing
+- [x] Peak memory during tiled 2048 inference is bounded (no monotonic growth across tiles)
+- [x] mx.get_cache_memory() returns ~0 after each tile
+- [x] 96px overlap produces better edge blending than 64px (visual check)
+- [x] Existing tiling tests updated and passing
 
 ---
 

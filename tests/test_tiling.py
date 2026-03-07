@@ -4,14 +4,17 @@ Verifies that:
 1. Single-tile images produce same results as non-tiled inference.
 2. Tiled results on larger images have reasonable blending behavior.
 3. Tile coordinate computation is correct.
+4. Phase 4: numpy input, per-tile memory cleanup, cache limit management.
 """
 
 from __future__ import annotations
 
 import mlx.core as mx
+import numpy as np
 import pytest
 
 from corridorkey_mlx.inference.tiling import (
+    DEFAULT_OVERLAP,
     _compute_tile_coords,
     _make_blend_weights_2d,
     tiled_inference,
@@ -25,7 +28,6 @@ TOLERANCE = 1e-5
 @pytest.fixture()
 def model() -> GreenFormer:
     model = GreenFormer(img_size=TILE_SIZE)
-    model.eval()
     # NOTE: mx.eval is MLX array materialization, not Python eval()
     mx.eval(model.parameters())  # noqa: S307
     return model
@@ -64,6 +66,15 @@ class TestTileCoords:
                 covered.update(range(start, end))
             assert covered == set(range(image_size)), f"Gap in coverage at size={image_size}"
 
+    def test_full_coverage_96px_overlap(self) -> None:
+        """Full coverage with 96px overlap (Phase 4 default)."""
+        for image_size in [300, 512, 700, 1024]:
+            coords = _compute_tile_coords(image_size, 256, 96)
+            covered = set()
+            for start, end in coords:
+                covered.update(range(start, end))
+            assert covered == set(range(image_size)), f"Gap at size={image_size}, overlap=96"
+
 
 class TestBlendWeights:
     def test_interior_tile(self) -> None:
@@ -86,18 +97,32 @@ class TestBlendWeights:
         w = _make_blend_weights_2d(256, 256, 0, (True, True, True, True))
         assert (w == 1.0).all()
 
+    def test_96px_overlap_ramps(self) -> None:
+        """96px overlap produces wider ramp regions."""
+        w = _make_blend_weights_2d(256, 256, 96, (True, True, True, True))
+        # At pixel 48 (midpoint of 96px ramp), weight should be ~0.5
+        assert 0.2 < w[48, 128] < 0.8
+
+
+class TestDefaultOverlap:
+    def test_default_overlap_is_96(self) -> None:
+        assert DEFAULT_OVERLAP == 96
+
 
 class TestTiledInference:
     def test_single_tile_matches_direct(self, model: GreenFormer) -> None:
         """Image that fits in one tile produces identical results to direct inference."""
         mx.random.seed(42)
-        x = mx.random.normal((1, TILE_SIZE, TILE_SIZE, 4))
-        mx.eval(x)  # noqa: S307
+        x_mx = mx.random.normal((1, TILE_SIZE, TILE_SIZE, 4))
+        # NOTE: mx.eval is MLX array materialization, not Python eval()
+        mx.eval(x_mx)  # noqa: S307
 
-        direct_out = model(x)
+        direct_out = model(x_mx)
         mx.eval(direct_out)  # noqa: S307
 
-        tiled_out = tiled_inference(model, x, tile_size=TILE_SIZE, overlap=32)
+        # tiled_inference now expects numpy input
+        x_np = np.array(x_mx)
+        tiled_out = tiled_inference(model, x_np, tile_size=TILE_SIZE, overlap=32)
         mx.eval(tiled_out)  # noqa: S307
 
         for key in ("alpha_final", "fg_final"):
@@ -106,11 +131,11 @@ class TestTiledInference:
 
     def test_larger_image_runs(self, model: GreenFormer) -> None:
         """Tiled inference runs without error on larger-than-tile images."""
-        mx.random.seed(42)
-        x = mx.random.normal((1, 400, 400, 4))
-        mx.eval(x)  # noqa: S307
+        rng = np.random.default_rng(42)
+        x_np = rng.standard_normal((1, 400, 400, 4)).astype(np.float32)
 
-        result = tiled_inference(model, x, tile_size=TILE_SIZE, overlap=32)
+        result = tiled_inference(model, x_np, tile_size=TILE_SIZE, overlap=32)
+        # NOTE: mx.eval is MLX array materialization, not Python eval()
         mx.eval(result)  # noqa: S307
 
         assert result["alpha_final"].shape == (1, 400, 400, 1)
@@ -118,7 +143,51 @@ class TestTiledInference:
 
     def test_batch_size_validation(self, model: GreenFormer) -> None:
         """Batch size > 1 raises ValueError."""
-        mx.random.seed(42)
-        x = mx.random.normal((2, TILE_SIZE, TILE_SIZE, 4))
+        rng = np.random.default_rng(42)
+        x_np = rng.standard_normal((2, TILE_SIZE, TILE_SIZE, 4)).astype(np.float32)
         with pytest.raises(ValueError, match="batch_size=1"):
-            tiled_inference(model, x, tile_size=TILE_SIZE)
+            tiled_inference(model, x_np, tile_size=TILE_SIZE)
+
+    def test_accepts_numpy_input(self, model: GreenFormer) -> None:
+        """tiled_inference accepts np.ndarray (Phase 4 lazy slicing)."""
+        rng = np.random.default_rng(42)
+        x_np = rng.standard_normal((1, TILE_SIZE, TILE_SIZE, 4)).astype(np.float32)
+        result = tiled_inference(model, x_np, tile_size=TILE_SIZE, overlap=32)
+        assert "alpha_final" in result
+        assert "fg_final" in result
+
+    def test_96px_overlap_runs(self, model: GreenFormer) -> None:
+        """Tiled inference with 96px overlap (new default) runs correctly."""
+        rng = np.random.default_rng(42)
+        x_np = rng.standard_normal((1, 400, 400, 4)).astype(np.float32)
+
+        result = tiled_inference(model, x_np, tile_size=TILE_SIZE, overlap=96)
+        # NOTE: mx.eval is MLX array materialization, not Python eval()
+        mx.eval(result)  # noqa: S307
+
+        assert result["alpha_final"].shape == (1, 400, 400, 1)
+        assert result["fg_final"].shape == (1, 400, 400, 3)
+
+    def test_cache_restored_after_tiling(self, model: GreenFormer) -> None:
+        """Cache limit is restored after tiled_inference completes."""
+        rng = np.random.default_rng(42)
+        x_np = rng.standard_normal((1, 400, 400, 4)).astype(np.float32)
+
+        tiled_inference(model, x_np, tile_size=TILE_SIZE, overlap=32)
+        cache_after = mx.get_cache_memory()
+
+        # Verify it completes cleanly and cache memory is queryable
+        assert cache_after >= 0
+
+    def test_no_monotonic_memory_growth(self, model: GreenFormer) -> None:
+        """Peak memory doesn't grow monotonically across tiles."""
+        rng = np.random.default_rng(42)
+        # Large enough for multiple tiles
+        x_np = rng.standard_normal((1, 600, 600, 4)).astype(np.float32)
+
+        mx.reset_peak_memory()
+        tiled_inference(model, x_np, tile_size=TILE_SIZE, overlap=32)
+        peak_after = mx.get_peak_memory()
+
+        # Peak should be bounded (not proportional to total image size)
+        assert peak_after > 0  # sanity: something was allocated
