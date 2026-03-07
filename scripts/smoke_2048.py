@@ -14,11 +14,11 @@ import sys
 import time
 from pathlib import Path
 
-import mlx.core as mx
 import numpy as np
 from PIL import Image
 
 from corridorkey_mlx import CorridorKeyMLXEngine
+from corridorkey_mlx.utils.profiling import memory_snapshot, reset_peak
 
 DEFAULT_CHECKPOINT = Path("checkpoints/corridorkey_mlx.safetensors")
 DEFAULT_IMG_SIZE = 2048
@@ -85,27 +85,6 @@ def report_diagnostics(result: dict[str, np.ndarray]) -> bool:
         healthy = False
 
     return healthy
-
-
-def get_peak_memory_mb() -> float | None:
-    """Read peak memory in MB, or None if unavailable."""
-    import contextlib
-
-    with contextlib.suppress(AttributeError):
-        return mx.get_peak_memory() / (1024 * 1024)
-    with contextlib.suppress(Exception):
-        return mx.metal.get_peak_memory() / (1024 * 1024)
-    return None
-
-
-def reset_peak_memory() -> None:
-    """Reset peak memory counter if available."""
-    import contextlib
-
-    with contextlib.suppress(AttributeError):
-        mx.reset_peak_memory()
-    with contextlib.suppress(Exception):
-        mx.metal.reset_peak_memory()
 
 
 def main() -> None:
@@ -191,17 +170,16 @@ def main() -> None:
 
     # -- run inference --
     print("Running inference...")
-    reset_peak_memory()
+    reset_peak()
     start = time.perf_counter()
 
     try:
         result = engine.process_frame(rgb, mask)
     except (RuntimeError, MemoryError) as exc:
         elapsed = time.perf_counter() - start
-        peak_mb = get_peak_memory_mb()
+        mem = memory_snapshot()
         print(f"\nFAILED after {elapsed:.1f}s")
-        if peak_mb is not None:
-            print(f"Peak memory: {peak_mb:.0f} MB")
+        print(f"Peak memory: {mem.peak_mb:.0f} MB")
         print(f"Error: {exc}")
         print("\nPossible causes:")
         print("  - Insufficient unified memory for 2048 inference")
@@ -210,12 +188,13 @@ def main() -> None:
         sys.exit(1)
 
     elapsed = time.perf_counter() - start
-    peak_mb = get_peak_memory_mb()
+    mem = memory_snapshot()
 
     # -- report --
     print(f"\nInference completed in {elapsed:.2f}s")
-    if peak_mb is not None:
-        print(f"Peak memory: {peak_mb:.0f} MB")
+    print(f"Peak memory:   {mem.peak_mb:.0f} MB")
+    print(f"Active memory: {mem.active_mb:.0f} MB")
+    print(f"Cache memory:  {mem.cache_mb:.0f} MB")
     source_label = "synthetic" if using_synthetic else f"loaded ({image_path})"
     print(f"Input: {source_label}, model res={args.img_size}x{args.img_size}")
     print("\nOutputs:")

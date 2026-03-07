@@ -48,6 +48,12 @@ This means process_frame() branches based on whether tiling is active.
 
 ---
 
+## Branch
+
+Feature branch: `feat/misc-optimizations`
+
+---
+
 ## Implementation Phases
 
 ### Phase 0: Benchmarking Infrastructure & Baseline
@@ -56,26 +62,26 @@ Set up measurement tooling before altering anything.
 
 #### Tasks
 
-- [ ] **0a. Memory profiling helpers** -- src/corridorkey_mlx/utils/profiling.py
+- [x] **0a. Memory profiling helpers** -- src/corridorkey_mlx/utils/profiling.py
   - Add memory_snapshot() returning {active_mb, peak_mb, cache_mb}
   - Uses mx.get_active_memory(), mx.get_peak_memory(), mx.get_cache_memory()
   - Add reset_peak() wrapper around mx.reset_peak_memory()
-- [ ] **0b. Update scripts/bench_mlx.py**
+- [x] **0b. Update scripts/bench_mlx.py**
   - Add memory columns (peak MB, active MB) to the results table
   - Call mx.reset_peak_memory() before each bench run
   - Report mx.get_peak_memory() after graph materialization
-- [ ] **0c. Update scripts/smoke_2048.py**
+- [x] **0c. Update scripts/smoke_2048.py**
   - Replace the try/except fallback chain with the correct mx.* APIs
   - Add cache memory reporting
-- [ ] **0d. Capture baseline numbers** at 512, 1024, 2048
+- [x] **0d. Capture baseline numbers** at 512, 1024, 2048
   - Document: peak memory, active memory, median latency
   - This determines feasibility of the <6GB target
 
 #### Acceptance Criteria
 
-- [ ] scripts/bench_mlx.py prints memory columns for each resolution
-- [ ] Baseline numbers documented in a docs/benchmarks/ file
-- [ ] All existing tests pass (uv run pytest)
+- [x] scripts/bench_mlx.py prints memory columns for each resolution
+- [x] Baseline numbers documented in a docs/benchmarks/ file
+- [x] All existing tests pass (uv run pytest)
 
 ---
 

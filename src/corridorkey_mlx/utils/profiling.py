@@ -1,7 +1,8 @@
 """Profiling utilities for MLX inference benchmarking.
 
-Provides timing helpers that force mx.eval() for accurate measurement,
-since MLX uses lazy evaluation.
+Provides timing helpers that force graph materialization for accurate
+measurement, since MLX uses lazy evaluation. Also provides memory
+snapshot utilities for tracking VRAM usage.
 """
 
 from __future__ import annotations
@@ -10,6 +11,39 @@ import time
 from dataclasses import dataclass
 
 import mlx.core as mx
+
+
+@dataclass
+class MemorySnapshot:
+    """Snapshot of MLX memory state in megabytes."""
+
+    active_mb: float
+    peak_mb: float
+    cache_mb: float
+
+    def __repr__(self) -> str:
+        return (
+            f"Memory(active={self.active_mb:.1f} MB, "
+            f"peak={self.peak_mb:.1f} MB, "
+            f"cache={self.cache_mb:.1f} MB)"
+        )
+
+
+BYTES_PER_MB = 1024 * 1024
+
+
+def memory_snapshot() -> MemorySnapshot:
+    """Capture current MLX memory state."""
+    return MemorySnapshot(
+        active_mb=mx.get_active_memory() / BYTES_PER_MB,
+        peak_mb=mx.get_peak_memory() / BYTES_PER_MB,
+        cache_mb=mx.get_cache_memory() / BYTES_PER_MB,
+    )
+
+
+def reset_peak() -> None:
+    """Reset the peak memory counter."""
+    mx.reset_peak_memory()
 
 
 @dataclass

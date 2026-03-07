@@ -24,7 +24,7 @@ from rich.table import Table
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from corridorkey_mlx.model.corridorkey import GreenFormer
-from corridorkey_mlx.utils.profiling import warmup_and_bench
+from corridorkey_mlx.utils.profiling import memory_snapshot, reset_peak, warmup_and_bench
 
 console = Console()
 
@@ -61,6 +61,8 @@ def bench_resolution(
     mx.eval(x)  # noqa: S307 — materialize input
 
     results: dict[str, object] = {"resolution": img_size, "batch_size": batch_size}
+
+    reset_peak()
 
     # --- Eager ---
     model_eager = GreenFormer(img_size=img_size)
@@ -108,6 +110,11 @@ def bench_resolution(
         results["compiled_warmup_ms"] = "FAIL"
         results["compiled_steady_ms"] = "FAIL"
         results["compiled_min_ms"] = "FAIL"
+
+    # --- Memory snapshot ---
+    mem = memory_snapshot()
+    results["peak_mb"] = round(mem.peak_mb, 1)
+    results["active_mb"] = round(mem.active_mb, 1)
 
     # --- Parity check ---
     try:
@@ -169,6 +176,8 @@ def main() -> None:
     table.add_column("Compiled Warmup", justify="right")
     table.add_column("Compiled Steady", justify="right")
     table.add_column("Speedup", justify="right")
+    table.add_column("Peak MB", justify="right")
+    table.add_column("Active MB", justify="right")
     table.add_column("Parity", justify="right")
 
     for r in all_results:
@@ -185,6 +194,8 @@ def main() -> None:
             str(r.get("compiled_warmup_ms", "")),
             str(r.get("compiled_steady_ms", "")),
             speedup,
+            str(r.get("peak_mb", "")),
+            str(r.get("active_mb", "")),
             str(r.get("parity_max_diff", "")),
         )
 
