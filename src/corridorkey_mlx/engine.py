@@ -177,12 +177,19 @@ class CorridorKeyMLXEngine:
         if needs_resize:
             scale_h = self._img_size / original_h
             scale_w = self._img_size / original_w
-            resizer = nn.Upsample(
+            rgb_resizer = nn.Upsample(
                 scale_factor=(scale_h, scale_w), mode="linear", align_corners=False
             )
-            # nn.Upsample expects NHWC
-            rgb_mx = resizer(rgb_mx[None])[0]  # (img_size, img_size, 3)
-            mask_mx = resizer(mask_mx[None])[0]  # (img_size, img_size, 1)
+            rgb_mx = rgb_resizer(rgb_mx[None])[0]  # (img_size, img_size, 3)
+
+            # Mask may have different dimensions than image — compute its own scale
+            mask_h, mask_w = mask_mx.shape[:2]
+            mask_scale_h = self._img_size / mask_h
+            mask_scale_w = self._img_size / mask_w
+            mask_resizer = nn.Upsample(
+                scale_factor=(mask_scale_h, mask_scale_w), mode="linear", align_corners=False
+            )
+            mask_mx = mask_resizer(mask_mx[None])[0]  # (img_size, img_size, 1)
 
         # -- preprocess: ImageNet norm + alpha concat (all MLX ops) --
         rgb_norm = (rgb_mx - _IMAGENET_MEAN) / _IMAGENET_STD
