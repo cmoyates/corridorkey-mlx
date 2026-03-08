@@ -247,7 +247,7 @@ def test_fused_decode_matches_unfused() -> None:
     mx.eval(model_unfused.parameters())  # noqa: S307
 
     model_fused = GreenFormer(img_size=SMALL_IMG_SIZE, fused_decode=True)
-    model_fused.load_weights(tree_flatten(model_unfused.parameters()))
+    model_fused.load_weights(tree_flatten(model_unfused.parameters()))  # type: ignore[arg-type]
     mx.eval(model_fused.parameters())  # noqa: S307
 
     out_u = model_unfused(x)
@@ -276,7 +276,7 @@ def test_fp32_default_unchanged() -> None:
     # Same weights via flattened tree
     from mlx.utils import tree_flatten
 
-    model_explicit.load_weights(tree_flatten(model_default.parameters()))
+    model_explicit.load_weights(tree_flatten(model_default.parameters()))  # type: ignore[arg-type]
     mx.eval(model_explicit.parameters())  # noqa: S307
 
     out_default = model_default(x)

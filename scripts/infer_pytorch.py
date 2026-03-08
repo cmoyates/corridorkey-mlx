@@ -15,10 +15,10 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
-from PIL import Image
 
 # Reuse the GreenFormer and loading logic from dump script
 from dump_pytorch_reference import IMG_SIZE, GreenFormer, load_checkpoint
+from PIL import Image
 
 IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).reshape(1, 3, 1, 1)
 IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).reshape(1, 3, 1, 1)
@@ -94,7 +94,7 @@ def main() -> None:
     # Composite over green
     alpha_f = alpha_np.astype(np.float32) / 255.0
     green = np.array([0, 177, 64], dtype=np.float32)
-    comp_np = (fg_np.astype(np.float32) * alpha_f[..., None] + green * (1 - alpha_f[..., None]))
+    comp_np = fg_np.astype(np.float32) * alpha_f[..., None] + green * (1 - alpha_f[..., None])
     comp_np = comp_np.clip(0, 255).astype(np.uint8)
 
     # Save
