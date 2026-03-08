@@ -8,8 +8,13 @@ Architecture mirrors nikopueringer/CorridorKey DecoderHead (SegFormer-style).
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import mlx.core as mx
 import mlx.nn as nn
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 class MLP(nn.Module):
@@ -98,3 +103,73 @@ class DecoderHead(nn.Module):
         fused = nn.relu(fused)
         # No dropout at inference (eval mode)
         return self.classifier(fused)
+
+    def _project_features(self, features: list[mx.array]) -> list[mx.array]:
+        """Project features without upsampling or fusion."""
+        linears = [self.linear_c1, self.linear_c2, self.linear_c3, self.linear_c4]
+        projected = []
+        for feat, linear in zip(features, linears, strict=True):
+            b, h, w, _c = feat.shape
+            x = feat.reshape(b, h * w, _c)
+            x = linear(x)
+            x = x.reshape(b, h, w, -1)
+            projected.append(x)
+        return projected
+
+    def _fuse_and_classify(self, projected: list[mx.array]) -> mx.array:
+        """Fuse pre-upsampled projections and classify."""
+        fused = mx.concatenate(projected[::-1], axis=-1)
+        fused = self.linear_fuse(fused)
+        fused = self.bn(fused)
+        fused = nn.relu(fused)
+        return self.classifier(fused)
+
+
+class FusedDecoderPair(nn.Module):
+    """Runs two DecoderHeads with batched upsampling.
+
+    Concatenates alpha+fg projections along channel axis before each upsample,
+    reducing 6 Metal dispatch calls to 3.
+    """
+
+    def __init__(self, alpha_head: DecoderHead, fg_head: DecoderHead) -> None:
+        super().__init__()
+        self.alpha_head = alpha_head
+        self.fg_head = fg_head
+        # Reuse alpha_head's pre-allocated upsamplers
+        self._upsamplers: Sequence[nn.Upsample | None] = [
+            None,
+            alpha_head._upsampler_2x,
+            alpha_head._upsampler_4x,
+            alpha_head._upsampler_8x,
+        ]
+
+    def __call__(
+        self, features: list[mx.array]
+    ) -> tuple[mx.array, mx.array]:
+        """Forward pass with batched upsampling.
+
+        Returns:
+            (alpha_logits, fg_logits) both in NHWC.
+        """
+        alpha_projs = self.alpha_head._project_features(features)
+        fg_projs = self.fg_head._project_features(features)
+
+        alpha_up = []
+        fg_up = []
+        for a_proj, f_proj, up in zip(
+            alpha_projs, fg_projs, self._upsamplers, strict=True
+        ):
+            if up is not None:
+                # Batch upsample: concat along channel axis (NHWC)
+                fused = mx.concatenate([a_proj, f_proj], axis=-1)
+                fused = up(fused)
+                embed_dim = a_proj.shape[-1]
+                a_proj = fused[:, :, :, :embed_dim]
+                f_proj = fused[:, :, :, embed_dim:]
+            alpha_up.append(a_proj)
+            fg_up.append(f_proj)
+
+        alpha_logits = self.alpha_head._fuse_and_classify(alpha_up)
+        fg_logits = self.fg_head._fuse_and_classify(fg_up)
+        return alpha_logits, fg_logits

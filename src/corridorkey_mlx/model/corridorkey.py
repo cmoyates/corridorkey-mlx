@@ -13,7 +13,7 @@ import mlx.nn as nn
 from safetensors import safe_open
 
 from corridorkey_mlx.model.backbone import HieraBackbone
-from corridorkey_mlx.model.decoder import DecoderHead
+from corridorkey_mlx.model.decoder import DecoderHead, FusedDecoderPair
 from corridorkey_mlx.model.hiera import ENCODER_KEY_PREFIX, _interpolate_pos_embed, _prod
 from corridorkey_mlx.model.refiner import CNNRefinerModule
 
@@ -31,12 +31,22 @@ class GreenFormer(nn.Module):
     Output: dict with coarse/final alpha and foreground maps in NHWC.
     """
 
-    def __init__(self, img_size: int = 512) -> None:
+    def __init__(
+        self,
+        img_size: int = 512,
+        dtype: mx.Dtype = mx.float32,
+        fused_decode: bool = False,
+    ) -> None:
         super().__init__()
+        self._compute_dtype = dtype
+        self._fused_decode = fused_decode
         self.backbone = HieraBackbone(img_size=img_size)
         self.alpha_decoder = DecoderHead(BACKBONE_CHANNELS, EMBED_DIM, output_dim=1)
         self.fg_decoder = DecoderHead(BACKBONE_CHANNELS, EMBED_DIM, output_dim=3)
         self.refiner = CNNRefinerModule()
+
+        if fused_decode:
+            self._fused_pair = FusedDecoderPair(self.alpha_decoder, self.fg_decoder)
 
         # Decoder outputs at stride-4 (H/4, W/4); upsampler is always 4x
         self._logit_upsampler = nn.Upsample(
@@ -54,22 +64,34 @@ class GreenFormer(nn.Module):
             alpha_coarse, fg_coarse, delta_logits, alpha_final, fg_final.
             All tensors in NHWC format.
         """
-        # Backbone -> 4 multiscale feature maps in NHWC
+        # Backbone always runs in fp32
         features = self.backbone(x)
 
+        # Cast features to compute dtype for decoders (bf16 saves memory)
+        if self._compute_dtype != mx.float32:
+            features = [f.astype(self._compute_dtype) for f in features]
+
         # Decoder heads -> logits at H/4 resolution
-        alpha_logits = self.alpha_decoder(features)  # (B, H/4, W/4, 1)
-        fg_logits = self.fg_decoder(features)  # (B, H/4, W/4, 3)
+        if self._fused_decode:
+            alpha_logits, fg_logits = self._fused_pair(features)
+        else:
+            alpha_logits = self.alpha_decoder(features)  # (B, H/4, W/4, 1)
+            fg_logits = self.fg_decoder(features)  # (B, H/4, W/4, 3)
 
         # Upsample logits to full input resolution (4x from stride-4 decoder)
         alpha_logits_up = self._logit_upsampler(alpha_logits)  # (B, H, W, 1)
         fg_logits_up = self._logit_upsampler(fg_logits)  # (B, H, W, 3)
 
-        # Coarse predictions via sigmoid
+        # Cast back to fp32 before sigmoid (precision at saturation boundaries)
+        if self._compute_dtype != mx.float32:
+            alpha_logits_up = alpha_logits_up.astype(mx.float32)
+            fg_logits_up = fg_logits_up.astype(mx.float32)
+
+        # Coarse predictions via sigmoid (always fp32)
         alpha_coarse = mx.sigmoid(alpha_logits_up)
         fg_coarse = mx.sigmoid(fg_logits_up)
 
-        # Refiner: RGB + coarse predictions -> delta logits
+        # Refiner receives fp32 coarse predictions
         rgb = x[:, :, :, :3]  # (B, H, W, 3)
         coarse_pred = mx.concatenate([alpha_coarse, fg_coarse], axis=-1)  # (B, H, W, 4)
         delta_logits = self.refiner(rgb, coarse_pred)  # (B, H, W, 4)
@@ -79,8 +101,8 @@ class GreenFormer(nn.Module):
         fg_final = mx.sigmoid(fg_logits_up + delta_logits[:, :, :, 1:4])
 
         return {
-            "alpha_logits": alpha_logits,
-            "fg_logits": fg_logits,
+            "alpha_logits": alpha_logits.astype(mx.float32),
+            "fg_logits": fg_logits.astype(mx.float32),
             "alpha_logits_up": alpha_logits_up,
             "fg_logits_up": fg_logits_up,
             "alpha_coarse": alpha_coarse,

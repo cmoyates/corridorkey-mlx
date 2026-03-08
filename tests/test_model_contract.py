@@ -192,3 +192,101 @@ def test_no_nan_inf() -> None:
         arr = np.array(out[key])
         assert not np.isnan(arr).any(), f"{key} contains NaN"
         assert not np.isinf(arr).any(), f"{key} contains Inf"
+
+
+# ---------------------------------------------------------------------------
+# bf16 mixed precision contract
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def bf16_model_output() -> dict[str, mx.array]:
+    """Forward pass with bf16 compute dtype, random weights."""
+    model = GreenFormer(img_size=SMALL_IMG_SIZE, dtype=mx.bfloat16)
+    mx.random.seed(42)
+    x = mx.random.normal((1, SMALL_IMG_SIZE, SMALL_IMG_SIZE, 4))
+    # mx.eval is MLX array materialization, not Python eval()
+    mx.eval(x)  # noqa: S307
+    out = model(x)
+    mx.eval(out)  # noqa: S307
+    return out
+
+
+def test_bf16_output_dtype_always_fp32(bf16_model_output: dict[str, mx.array]) -> None:
+    """All outputs must be fp32 regardless of compute dtype."""
+    for key, arr in bf16_model_output.items():
+        assert arr.dtype == mx.float32, f"{key}: expected float32, got {arr.dtype}"
+
+
+def test_bf16_sigmoid_outputs_in_range(bf16_model_output: dict[str, mx.array]) -> None:
+    """Post-sigmoid outputs must be in [0, 1] even with bf16 compute."""
+    for key in ("alpha_coarse", "fg_coarse", "alpha_final", "fg_final"):
+        arr = bf16_model_output[key]
+        assert float(mx.min(arr)) >= 0.0, f"{key} has values < 0"
+        assert float(mx.max(arr)) <= 1.0, f"{key} has values > 1"
+
+
+def test_bf16_no_nan_inf(bf16_model_output: dict[str, mx.array]) -> None:
+    """bf16 forward produces finite outputs."""
+    for key in ("alpha_final", "fg_final"):
+        arr = np.array(bf16_model_output[key])
+        assert not np.isnan(arr).any(), f"{key} contains NaN"
+        assert not np.isinf(arr).any(), f"{key} contains Inf"
+
+
+def test_fused_decode_matches_unfused() -> None:
+    """Fused decoder pair produces bit-exact output vs independent decoders."""
+    from mlx.utils import tree_flatten
+
+    mx.random.seed(77)
+    x = mx.random.normal((1, SMALL_IMG_SIZE, SMALL_IMG_SIZE, 4))
+    # mx.eval is MLX array materialization, not Python eval()
+    mx.eval(x)  # noqa: S307
+
+    model_unfused = GreenFormer(img_size=SMALL_IMG_SIZE, fused_decode=False)
+    mx.eval(model_unfused.parameters())  # noqa: S307
+
+    model_fused = GreenFormer(img_size=SMALL_IMG_SIZE, fused_decode=True)
+    model_fused.load_weights(tree_flatten(model_unfused.parameters()))
+    mx.eval(model_fused.parameters())  # noqa: S307
+
+    out_u = model_unfused(x)
+    out_f = model_fused(x)
+    mx.eval(out_u)  # noqa: S307
+    mx.eval(out_f)  # noqa: S307
+
+    for key in out_u:
+        np.testing.assert_array_equal(
+            np.array(out_u[key]),
+            np.array(out_f[key]),
+            err_msg=f"{key} differs between fused and unfused decode",
+        )
+
+
+def test_fp32_default_unchanged() -> None:
+    """GreenFormer(dtype=mx.float32) behaves identically to GreenFormer()."""
+    mx.random.seed(99)
+    x = mx.random.normal((1, SMALL_IMG_SIZE, SMALL_IMG_SIZE, 4))
+    # mx.eval is MLX array materialization, not Python eval()
+    mx.eval(x)  # noqa: S307
+
+    model_default = GreenFormer(img_size=SMALL_IMG_SIZE)
+    model_explicit = GreenFormer(img_size=SMALL_IMG_SIZE, dtype=mx.float32)
+
+    # Same weights via flattened tree
+    from mlx.utils import tree_flatten
+
+    model_explicit.load_weights(tree_flatten(model_default.parameters()))
+    mx.eval(model_explicit.parameters())  # noqa: S307
+
+    out_default = model_default(x)
+    out_explicit = model_explicit(x)
+    mx.eval(out_default)  # noqa: S307
+    mx.eval(out_explicit)  # noqa: S307
+
+    for key in out_default:
+        np.testing.assert_array_equal(
+            np.array(out_default[key]),
+            np.array(out_explicit[key]),
+            err_msg=f"{key} differs between default and explicit fp32",
+        )

@@ -122,9 +122,9 @@ def __call__(self, x: mx.array) -> dict[str, mx.array]:
 
 ### 1.3 Guardrails
 
-- [ ] Verify all `nn.GroupNorm` layers retain `pytorch_compatible=True` after any decoder modifications
-- [ ] Verify `nn.BatchNorm` in decoder fusion layer handles bf16 inputs correctly (running stats are fp32 in eval mode — matmul should auto-promote)
-- [ ] If mx.compile + bf16 fails (Spike 0a), add `if self._compute_dtype != mx.float32: self._compiled = False` guard
+- [x] Verify all `nn.GroupNorm` layers retain `pytorch_compatible=True` after any decoder modifications
+- [x] Verify `nn.BatchNorm` in decoder fusion layer handles bf16 inputs correctly (running stats are fp32 in eval mode — matmul should auto-promote)
+- [x] If mx.compile + bf16 fails (Spike 0a), add `if self._compute_dtype != mx.float32: self._compiled = False` guard — N/A, spike passed
 
 ### 1.4 Test Updates
 
@@ -201,10 +201,10 @@ class FusedDecoderPair(nn.Module):
 
 ### 2.3 Constraints
 
-- [ ] `nn.Upsample` instances stay pre-allocated in `__init__` (Phase 6 guardrail)
-- [ ] Concatenation on `axis=-1` only (NHWC)
-- [ ] Checkpoint loading unaffected (same `alpha_decoder.*` / `fg_decoder.*` keys)
-- [ ] mx.compile shape tracing: channel dim changes from 256 to 512 in fused path — verify compile handles this
+- [x] `nn.Upsample` instances stay pre-allocated in `__init__` (Phase 6 guardrail)
+- [x] Concatenation on `axis=-1` only (NHWC)
+- [x] Checkpoint loading unaffected (same `alpha_decoder.*` / `fg_decoder.*` keys)
+- [x] mx.compile shape tracing: channel dim changes from 256 to 512 in fused path — verify compile handles this
 
 ### 2.4 Fallback Criteria
 

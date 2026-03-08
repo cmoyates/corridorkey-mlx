@@ -6,6 +6,7 @@ mirrors the Torch engine contract expected by the main CorridorKey repository.
 
 from __future__ import annotations
 
+import gc
 import logging
 import warnings
 from pathlib import Path
@@ -151,6 +152,10 @@ class CorridorKeyMLXEngine:
         fg_coarse = outputs["fg_coarse"]
         alpha_refined = outputs["alpha_final"]
         fg_refined = outputs["fg_final"]
+
+        # Release unused intermediate tensors (logits, delta_logits, etc.)
+        del outputs
+        gc.collect()
 
         if not self._use_refiner or refiner_scale == 0.0:
             alpha_out = alpha_coarse
