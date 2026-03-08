@@ -79,9 +79,7 @@ class CorridorKeyMLXEngine:
 
         self._img_size = img_size
         self._use_refiner = use_refiner
-        self._model: GreenFormer = load_model(
-            checkpoint, img_size=img_size, compile=compile
-        )
+        self._model: GreenFormer = load_model(checkpoint, img_size=img_size, compile=compile)
 
     def process_frame(
         self,
@@ -203,11 +201,7 @@ class CorridorKeyMLXEngine:
         # -- composite over black --
         alpha_3ch = alpha_u8[:, :, np.newaxis].astype(np.float32) / 255.0
         fg_float = fg_u8.astype(np.float32)
-        comp = (
-            (fg_float * alpha_3ch).astype(np.uint8)
-            if fg_is_straight
-            else fg_u8.copy()
-        )
+        comp = (fg_float * alpha_3ch).astype(np.uint8) if fg_is_straight else fg_u8.copy()
 
         return {
             "alpha": alpha_u8,

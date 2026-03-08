@@ -144,9 +144,7 @@ class FusedDecoderPair(nn.Module):
             alpha_head._upsampler_8x,
         ]
 
-    def __call__(
-        self, features: list[mx.array]
-    ) -> tuple[mx.array, mx.array]:
+    def __call__(self, features: list[mx.array]) -> tuple[mx.array, mx.array]:
         """Forward pass with batched upsampling.
 
         Returns:
@@ -157,9 +155,7 @@ class FusedDecoderPair(nn.Module):
 
         alpha_up = []
         fg_up = []
-        for a_proj, f_proj, up in zip(
-            alpha_projs, fg_projs, self._upsamplers, strict=True
-        ):
+        for a_proj, f_proj, up in zip(alpha_projs, fg_projs, self._upsamplers, strict=True):
             if up is not None:
                 # Batch upsample: concat along channel axis (NHWC)
                 fused = mx.concatenate([a_proj, f_proj], axis=-1)

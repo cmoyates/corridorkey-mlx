@@ -33,6 +33,8 @@ def load_model(
     img_size: int = DEFAULT_IMG_SIZE,
     compile: bool = False,
     shapeless: bool = False,
+    dtype: mx.Dtype = mx.bfloat16,
+    fused_decode: bool = True,
 ) -> GreenFormer:
     """Build GreenFormer and load weights from safetensors checkpoint.
 
@@ -44,8 +46,12 @@ def load_model(
             no shape-dependent logic varies across calls. The Hiera backbone
             uses shape-dependent reshapes, so shapeless is NOT recommended
             unless all inputs share the same spatial dimensions.
+        dtype: Compute dtype for decoder activations. bfloat16 reduces memory;
+            backbone and sigmoid always stay fp32. All outputs are fp32.
+        fused_decode: If True, batch alpha+fg decoder upsamples to reduce
+            Metal dispatch calls. Bit-exact with unfused path.
     """
-    model = GreenFormer(img_size=img_size)
+    model = GreenFormer(img_size=img_size, dtype=dtype, fused_decode=fused_decode)
     model.load_checkpoint(checkpoint)
     if compile:
         model = compile_model(model, shapeless=shapeless)

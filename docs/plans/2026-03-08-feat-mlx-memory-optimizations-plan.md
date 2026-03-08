@@ -310,24 +310,24 @@ uv run pytest tests/test_parity.py tests/test_tiling.py -v
 
 ### Functional
 
-- [ ] All existing fp32 parity tests pass unchanged
-- [ ] bf16 forward produces outputs within measurable tolerance of fp32 golden references
-- [ ] Tiled inference completes without OOM on representative input
-- [ ] `GreenFormer(dtype=mx.float32)` is exact same behavior as current code (zero regression)
-- [ ] Checkpoint loading unchanged — same safetensors keys
+- [x] All existing fp32 parity tests pass unchanged
+- [x] bf16 forward produces outputs within measurable tolerance of fp32 golden references
+- [x] Tiled inference completes without OOM on representative input
+- [x] `GreenFormer(dtype=mx.float32)` is exact same behavior as current code (zero regression)
+- [x] Checkpoint loading unchanged — same safetensors keys
 
 ### Non-Functional
 
-- [ ] Peak Metal memory measurably reduced (benchmark with `scripts/bench_mlx.py`)
-- [ ] No new dependencies
-- [ ] GroupNorm `pytorch_compatible=True` preserved in all instances
+- [x] Peak Metal memory measurably reduced (benchmark with `scripts/bench_mlx.py`)
+- [x] No new dependencies
+- [x] GroupNorm `pytorch_compatible=True` preserved in all instances
 
 ### Quality Gates
 
-- [ ] `uv run pytest` — all tests pass
-- [ ] `uv run ruff check .` — no lint errors
-- [ ] `uv run ruff format .` — formatted
-- [ ] `uv run ty check` — no type errors
+- [x] `uv run pytest` — all tests pass (80 passed, 4 skipped)
+- [x] `uv run ruff check .` — no lint errors
+- [x] `uv run ruff format .` — formatted
+- [x] `uv run ty check` — pre-existing issues only (torch import, tree_flatten typing)
 
 ---
 
@@ -340,6 +340,27 @@ uv run pytest tests/test_parity.py tests/test_tiling.py -v
 | mx.metal.clear_cache() doesn't exist | Low | Low | Guarded with hasattr; gc.collect alone may suffice |
 | Step 2 FusedDecoderPair too complex | Medium | Low | Hard fallback criteria — skip and focus on Step 3 |
 | Prior fp16 revert cause applies to bf16 | Low | High | Spike 0c — check git history |
+
+---
+
+## Benchmark Results (2048x2048, M-series Mac)
+
+| Mode | Time | Peak Memory | Active After |
+|------|------|-------------|-------------|
+| fp32 full-frame | 4706ms | 27,587MB | 739MB |
+| bf16 full-frame | 4707ms | 27,587MB | 739MB |
+| fused full-frame | 4794ms | 28,199MB | 739MB |
+| **Tiled 512+64 w/ GC** | **3591ms** | **2,310MB** | **423MB** |
+
+**Key finding:** Tiled + GC pipeline = 12x peak memory reduction (27.6GB → 2.3GB) and 24% faster than full-frame. bf16/fused have negligible impact at 2048 because the backbone (fp32, 24 blocks) dominates.
+
+### Spike Results
+
+| Spike | Result |
+|-------|--------|
+| 0a: mx.compile + bf16 | PASS — works without issues |
+| 0b: mx.metal.clear_cache() | EXISTS but deprecated — use `mx.clear_cache()` |
+| 0c: fp16 revert history | No revert — fp16 on separate branch, decoder-only stayed within tolerance |
 
 ---
 
