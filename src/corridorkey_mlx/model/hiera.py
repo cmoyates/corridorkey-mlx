@@ -251,6 +251,7 @@ class MaskUnitAttention(nn.Module):
         q_stride: int = 1,
         window_size: int = 0,
         use_mask_unit_attn: bool = False,
+        use_sdpa: bool = True,
     ) -> None:
         super().__init__()
         self.dim_out = dim_out
@@ -260,6 +261,7 @@ class MaskUnitAttention(nn.Module):
         self.scale = self.head_dim**-0.5
         self.window_size = window_size
         self.use_mask_unit_attn = use_mask_unit_attn
+        self._use_sdpa = use_sdpa
 
         self.qkv = nn.Linear(dim, 3 * dim_out)
         self.proj = nn.Linear(dim_out, dim_out)
@@ -284,10 +286,32 @@ class MaskUnitAttention(nn.Module):
             q = q.reshape(batch_size, self.heads, num_windows, self.q_stride, -1, self.head_dim)
             q = mx.max(q, axis=3)
 
-        # Scaled dot-product attention (manual implementation)
-        attn = (q * self.scale) @ mx.transpose(k, axes=(0, 1, 2, 4, 3))
-        attn = mx.softmax(attn, axis=-1)
-        x = attn @ v
+        if self._use_sdpa:
+            # Fold window dim into batch for SDPA (expects 4D).
+            # Q/K/V are (B, heads, windows, tokens, head_dim) — transpose windows
+            # next to batch before reshape so (B, W, H, T, D) -> (B*W, H, T, D).
+            q_tokens = q.shape[3]
+            kv_tokens = k.shape[3]
+            q_4d = mx.transpose(q, axes=(0, 2, 1, 3, 4)).reshape(
+                batch_size * num_windows, self.heads, q_tokens, self.head_dim
+            )
+            k_4d = mx.transpose(k, axes=(0, 2, 1, 3, 4)).reshape(
+                batch_size * num_windows, self.heads, kv_tokens, self.head_dim
+            )
+            v_4d = mx.transpose(v, axes=(0, 2, 1, 3, 4)).reshape(
+                batch_size * num_windows, self.heads, kv_tokens, self.head_dim
+            )
+
+            x = mx.fast.scaled_dot_product_attention(q_4d, k_4d, v_4d, scale=self.scale)
+
+            # Unfold: (B*W, H, T, D) -> (B, W, H, T, D) -> (B, H, W, T, D)
+            x = x.reshape(batch_size, num_windows, self.heads, q_tokens, self.head_dim)
+            x = mx.transpose(x, axes=(0, 2, 1, 3, 4))
+        else:
+            # Manual scaled dot-product attention (original implementation)
+            attn = (q * self.scale) @ mx.transpose(k, axes=(0, 1, 2, 4, 3))
+            attn = mx.softmax(attn, axis=-1)
+            x = attn @ v
 
         # [B, heads, num_windows, tokens, head_dim] -> [B, tokens, num_windows, heads, head_dim]
         # -> [B, N', dim_out]  (matches PyTorch transpose(1, 3))
@@ -312,6 +336,7 @@ class HieraBlock(nn.Module):
         q_stride: int = 1,
         window_size: int = 0,
         use_mask_unit_attn: bool = False,
+        use_sdpa: bool = True,
     ) -> None:
         super().__init__()
         self.dim = dim
@@ -324,7 +349,7 @@ class HieraBlock(nn.Module):
             self.proj = nn.Linear(dim, dim_out)
 
         self.attn = MaskUnitAttention(
-            dim, dim_out, heads, q_stride, window_size, use_mask_unit_attn
+            dim, dim_out, heads, q_stride, window_size, use_mask_unit_attn, use_sdpa=use_sdpa
         )
 
         self.norm2 = nn.LayerNorm(dim_out)
@@ -353,7 +378,7 @@ class HieraBackbone(nn.Module):
     Hardcoded for hiera_base_plus_224 config with 4-channel input.
     """
 
-    def __init__(self, img_size: int = 512) -> None:
+    def __init__(self, img_size: int = 512, use_sdpa: bool = True) -> None:
         super().__init__()
         self.img_size = img_size
 
@@ -418,6 +443,7 @@ class HieraBackbone(nn.Module):
                 q_stride=(flat_q_stride if i in q_pool_blocks else 1),
                 window_size=flat_mu_size,
                 use_mask_unit_attn=use_mu_attn,
+                use_sdpa=use_sdpa,
             )
             self.blocks.append(block)
             embed_dim = dim_out

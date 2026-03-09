@@ -33,6 +33,11 @@ def load_model(
     img_size: int = DEFAULT_IMG_SIZE,
     compile: bool = False,
     shapeless: bool = False,
+    dtype: mx.Dtype = mx.bfloat16,
+    fused_decode: bool = True,
+    slim: bool = False,
+    use_sdpa: bool = True,
+    stage_gc: bool = True,
 ) -> GreenFormer:
     """Build GreenFormer and load weights from safetensors checkpoint.
 
@@ -44,8 +49,23 @@ def load_model(
             no shape-dependent logic varies across calls. The Hiera backbone
             uses shape-dependent reshapes, so shapeless is NOT recommended
             unless all inputs share the same spatial dimensions.
+        dtype: Compute dtype for decoder activations. bfloat16 reduces memory;
+            backbone and sigmoid always stay fp32. All outputs are fp32.
+        fused_decode: If True, batch alpha+fg decoder upsamples to reduce
+            Metal dispatch calls. Bit-exact with unfused path.
+        slim: If True, forward returns only 4 final keys (drops intermediates).
+            Reduces reference lifetime so MLX can reclaim buffers sooner.
+        use_sdpa: If True, use mx.fast.scaled_dot_product_attention in backbone.
+        stage_gc: If True, materialize + GC at backbone/decoder/refiner boundaries.
     """
-    model = GreenFormer(img_size=img_size)
+    model = GreenFormer(
+        img_size=img_size,
+        dtype=dtype,
+        fused_decode=fused_decode,
+        slim=slim,
+        use_sdpa=use_sdpa,
+        stage_gc=stage_gc,
+    )
     model.load_checkpoint(checkpoint)
     if compile:
         model = compile_model(model, shapeless=shapeless)
@@ -59,6 +79,7 @@ def compile_model(model: GreenFormer, shapeless: bool = False) -> GreenFormer:
     same resolution. Shapeless compile is experimental — the backbone uses
     shape-dependent reshapes that may trigger recompilation.
     """
+    model._compiled = True
     model.__call__ = mx.compile(model.__call__, shapeless=shapeless)  # type: ignore[method-assign]
     return model
 

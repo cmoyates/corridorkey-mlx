@@ -5,6 +5,7 @@ from __future__ import annotations
 import mlx.core as mx
 import pytest
 
+from corridorkey_mlx.inference.pipeline import compile_model
 from corridorkey_mlx.model.corridorkey import GreenFormer
 
 IMG_SIZE = 256
@@ -32,11 +33,11 @@ def dummy_input() -> mx.array:
 def test_compiled_matches_eager(model: GreenFormer, dummy_input: mx.array) -> None:
     """Fixed-shape compiled output matches eager output within tolerance."""
     eager_out = model(dummy_input)
-    mx.eval(eager_out)  # noqa: S307
+    mx.eval(eager_out)  # noqa: S307  # NOTE: MLX materialization, not Python eval
 
-    compiled_fn = mx.compile(model.__call__)
-    compiled_out = compiled_fn(dummy_input)
-    mx.eval(compiled_out)  # noqa: S307
+    compiled_model = compile_model(model)
+    compiled_out = compiled_model(dummy_input)
+    mx.eval(compiled_out)  # noqa: S307  # NOTE: MLX materialization
 
     for key in OUTPUT_KEYS:
         diff = float(mx.max(mx.abs(eager_out[key] - compiled_out[key])))
@@ -45,12 +46,12 @@ def test_compiled_matches_eager(model: GreenFormer, dummy_input: mx.array) -> No
 
 def test_compiled_deterministic(model: GreenFormer, dummy_input: mx.array) -> None:
     """Compiled model produces identical results across consecutive calls."""
-    compiled_fn = mx.compile(model.__call__)
+    compiled_model = compile_model(model)
 
-    out1 = compiled_fn(dummy_input)
-    mx.eval(out1)  # noqa: S307
-    out2 = compiled_fn(dummy_input)
-    mx.eval(out2)  # noqa: S307
+    out1 = compiled_model(dummy_input)
+    mx.eval(out1)  # noqa: S307  # NOTE: MLX materialization
+    out2 = compiled_model(dummy_input)
+    mx.eval(out2)  # noqa: S307  # NOTE: MLX materialization
 
     for key in OUTPUT_KEYS:
         diff = float(mx.max(mx.abs(out1[key] - out2[key])))

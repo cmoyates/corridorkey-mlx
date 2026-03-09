@@ -23,7 +23,7 @@ EXPECTED_KEY_COUNT = 365
 
 def _torch_available() -> bool:
     try:
-        import torch  # noqa: F401
+        import torch  # noqa: F401  # type: ignore[import-not-found]
 
         return True
     except ImportError:

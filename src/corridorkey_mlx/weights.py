@@ -116,9 +116,7 @@ def list_assets(release: dict[str, Any]) -> list[dict[str, Any]]:
     return release.get("assets", [])
 
 
-def find_asset(
-    release: dict[str, Any], asset_name: str | None = None
-) -> dict[str, Any]:
+def find_asset(release: dict[str, Any], asset_name: str | None = None) -> dict[str, Any]:
     """Find a specific asset in a release, or infer from platform."""
     assets = list_assets(release)
     target = asset_name or default_asset_name()
@@ -275,9 +273,7 @@ def download_asset(
                 )
             _console.print("[green]Checksum OK[/green]")
         else:
-            _console.print(
-                "[yellow]No checksum file found — skipping verification[/yellow]"
-            )
+            _console.print("[yellow]No checksum file found — skipping verification[/yellow]")
 
     # atomic rename
     partial_path.rename(final_path)

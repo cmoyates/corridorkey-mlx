@@ -6,6 +6,7 @@ then blends results using linear ramp weights in the overlap region.
 
 from __future__ import annotations
 
+import gc
 from typing import TYPE_CHECKING
 
 import mlx.core as mx
@@ -156,6 +157,11 @@ def tiled_inference(
             alpha_accum[y_start:y_end, x_start:x_end, :] += alpha_tile * w3d
             fg_accum[y_start:y_end, x_start:x_end, :] += fg_tile * w3d
             weight_accum[y_start:y_end, x_start:x_end, :] += w3d
+
+            # Deterministic memory cleanup — release MLX graph refs between tiles
+            del out, tile, alpha_tile, fg_tile
+            gc.collect()
+            mx.clear_cache()
 
     # Normalize by accumulated weights
     weight_accum = np.maximum(weight_accum, 1e-8)
