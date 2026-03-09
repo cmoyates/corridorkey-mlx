@@ -6,6 +6,7 @@ All internal operations use NHWC layout.
 
 from __future__ import annotations
 
+import gc
 from typing import TYPE_CHECKING
 
 import mlx.core as mx
@@ -42,6 +43,7 @@ class GreenFormer(nn.Module):
         self._compute_dtype = dtype
         self._fused_decode = fused_decode
         self._slim = slim
+        self._compiled = False
         self.backbone = HieraBackbone(img_size=img_size)
         self.alpha_decoder = DecoderHead(BACKBONE_CHANNELS, EMBED_DIM, output_dim=1)
         self.fg_decoder = DecoderHead(BACKBONE_CHANNELS, EMBED_DIM, output_dim=3)
@@ -69,6 +71,13 @@ class GreenFormer(nn.Module):
         # Backbone always runs in fp32
         features = self.backbone(x)
 
+        # Materialize backbone output so MLX can free intermediate graph nodes.
+        # NOTE: mx.eval is MLX array materialization, not Python eval()
+        if not self._compiled:
+            mx.eval(features)  # noqa: S307
+            gc.collect()
+            mx.clear_cache()
+
         # Cast features to compute dtype for decoders (bf16 saves memory)
         if self._compute_dtype != mx.float32:
             features = [f.astype(self._compute_dtype) for f in features]
@@ -92,6 +101,13 @@ class GreenFormer(nn.Module):
         # Coarse predictions via sigmoid (always fp32)
         alpha_coarse = mx.sigmoid(alpha_logits_up)
         fg_coarse = mx.sigmoid(fg_logits_up)
+
+        # Materialize decoder output so MLX can free decoder graph nodes.
+        # NOTE: mx.eval is MLX array materialization, not Python eval()
+        if not self._compiled:
+            mx.eval(alpha_coarse, fg_coarse, alpha_logits_up, fg_logits_up)  # noqa: S307
+            gc.collect()
+            mx.clear_cache()
 
         # Refiner receives fp32 coarse predictions
         rgb = x[:, :, :, :3]  # (B, H, W, 3)

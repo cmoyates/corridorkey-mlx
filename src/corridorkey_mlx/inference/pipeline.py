@@ -68,6 +68,7 @@ def compile_model(model: GreenFormer, shapeless: bool = False) -> GreenFormer:
     same resolution. Shapeless compile is experimental — the backbone uses
     shape-dependent reshapes that may trigger recompilation.
     """
+    model._compiled = True
     model.__call__ = mx.compile(model.__call__, shapeless=shapeless)  # type: ignore[method-assign]
     return model
 
