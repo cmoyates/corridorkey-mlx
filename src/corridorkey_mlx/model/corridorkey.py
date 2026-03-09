@@ -38,13 +38,16 @@ class GreenFormer(nn.Module):
         dtype: mx.Dtype = mx.float32,
         fused_decode: bool = False,
         slim: bool = False,
+        use_sdpa: bool = True,
+        stage_gc: bool = True,
     ) -> None:
         super().__init__()
         self._compute_dtype = dtype
         self._fused_decode = fused_decode
         self._slim = slim
+        self._stage_gc = stage_gc
         self._compiled = False
-        self.backbone = HieraBackbone(img_size=img_size)
+        self.backbone = HieraBackbone(img_size=img_size, use_sdpa=use_sdpa)
         self.alpha_decoder = DecoderHead(BACKBONE_CHANNELS, EMBED_DIM, output_dim=1)
         self.fg_decoder = DecoderHead(BACKBONE_CHANNELS, EMBED_DIM, output_dim=3)
         self.refiner = CNNRefinerModule()
@@ -73,7 +76,7 @@ class GreenFormer(nn.Module):
 
         # Materialize backbone output so MLX can free intermediate graph nodes.
         # NOTE: mx.eval is MLX array materialization, not Python eval()
-        if not self._compiled:
+        if self._stage_gc and not self._compiled:
             mx.eval(features)  # noqa: S307
             gc.collect()
             mx.clear_cache()
@@ -104,7 +107,7 @@ class GreenFormer(nn.Module):
 
         # Materialize decoder output so MLX can free decoder graph nodes.
         # NOTE: mx.eval is MLX array materialization, not Python eval()
-        if not self._compiled:
+        if self._stage_gc and not self._compiled:
             mx.eval(alpha_coarse, fg_coarse, alpha_logits_up, fg_logits_up)  # noqa: S307
             gc.collect()
             mx.clear_cache()

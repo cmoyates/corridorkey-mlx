@@ -36,6 +36,8 @@ def load_model(
     dtype: mx.Dtype = mx.bfloat16,
     fused_decode: bool = True,
     slim: bool = False,
+    use_sdpa: bool = True,
+    stage_gc: bool = True,
 ) -> GreenFormer:
     """Build GreenFormer and load weights from safetensors checkpoint.
 
@@ -53,8 +55,17 @@ def load_model(
             Metal dispatch calls. Bit-exact with unfused path.
         slim: If True, forward returns only 4 final keys (drops intermediates).
             Reduces reference lifetime so MLX can reclaim buffers sooner.
+        use_sdpa: If True, use mx.fast.scaled_dot_product_attention in backbone.
+        stage_gc: If True, materialize + GC at backbone/decoder/refiner boundaries.
     """
-    model = GreenFormer(img_size=img_size, dtype=dtype, fused_decode=fused_decode, slim=slim)
+    model = GreenFormer(
+        img_size=img_size,
+        dtype=dtype,
+        fused_decode=fused_decode,
+        slim=slim,
+        use_sdpa=use_sdpa,
+        stage_gc=stage_gc,
+    )
     model.load_checkpoint(checkpoint)
     if compile:
         model = compile_model(model, shapeless=shapeless)
