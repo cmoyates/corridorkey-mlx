@@ -102,7 +102,7 @@ class CorridorKeyMLXEngine:
             # Tiled: model runs at tile_size, input stays full-res
             self._img_size = self._tile_size
             self._model: GreenFormer = load_model(
-                checkpoint, img_size=self._tile_size, compile=False
+                checkpoint, img_size=self._tile_size, compile=False, slim=True
             )
             logger.info(
                 "Tiled inference: tile_size=%d, overlap=%d", self._tile_size, self._overlap
@@ -110,7 +110,7 @@ class CorridorKeyMLXEngine:
         else:
             # Full-frame: resize input to img_size
             self._img_size = img_size
-            self._model = load_model(checkpoint, img_size=img_size, compile=compile)
+            self._model = load_model(checkpoint, img_size=img_size, compile=compile, slim=True)
 
     def process_frame(
         self,
@@ -212,6 +212,11 @@ class CorridorKeyMLXEngine:
         # -- postprocess to uint8 --
         alpha_u8 = postprocess_alpha(alpha_out)
         fg_u8 = postprocess_foreground(fg_out)
+
+        # Release all MLX array references, then free Metal buffer cache
+        del alpha_out, fg_out
+        gc.collect()
+        mx.clear_cache()
 
         # -- resize back to original --
         if alpha_u8.shape[0] != original_h or alpha_u8.shape[1] != original_w:
