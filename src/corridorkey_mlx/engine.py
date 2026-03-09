@@ -17,6 +17,10 @@ import numpy as np
 from PIL import Image
 
 from corridorkey_mlx.inference.pipeline import load_model
+from corridorkey_mlx.inference.tiling import (
+    DEFAULT_OVERLAP,
+    tiled_inference,
+)
 from corridorkey_mlx.io.image import (
     postprocess_alpha,
     postprocess_foreground,
@@ -40,17 +44,27 @@ class CorridorKeyMLXEngine:
         device: Ignored on MLX (Apple Silicon uses unified memory).
             Accepted for API compatibility with the Torch engine.
         img_size: Internal model resolution (square). The model was trained
-            at 2048. Use 512 for fast dev iteration.
+            at 2048. Use 512 for fast dev iteration. When tiling is enabled,
+            this is ignored and the model runs at ``tile_size``.
         use_refiner: If True, return refined alpha/fg. If False, return
             coarse predictions (skips refiner in postprocessing, not forward pass).
         compile: If True, wrap model forward with ``mx.compile`` for faster
             repeated inference at the same resolution.
+        tile_size: If set, enable tiled inference — split full-res input into
+            overlapping tiles of this size. Model loads at tile_size instead of
+            img_size. Set to 0 or None to disable.
+        overlap: Overlap in pixels between adjacent tiles (default 64).
 
     Example::
 
         from corridorkey_mlx import CorridorKeyMLXEngine
 
+        # Full-frame (default)
         engine = CorridorKeyMLXEngine("/path/to/corridorkey_mlx.safetensors")
+
+        # Tiled — 12x less memory at 2048x2048
+        engine = CorridorKeyMLXEngine("/path/to/ckpt.safetensors", tile_size=512, overlap=64)
+
         result = engine.process_frame(rgb_uint8, mask_uint8)
         # result["alpha"]     — (H, W) uint8
         # result["fg"]        — (H, W, 3) uint8
@@ -68,6 +82,8 @@ class CorridorKeyMLXEngine:
         img_size: int = PRODUCTION_IMG_SIZE,
         use_refiner: bool = True,
         compile: bool = True,
+        tile_size: int | None = None,
+        overlap: int = DEFAULT_OVERLAP,
     ) -> None:
         checkpoint = Path(checkpoint_path)
         if not checkpoint.exists():
@@ -77,9 +93,24 @@ class CorridorKeyMLXEngine:
         if device is not None:
             logger.info("device=%r ignored on MLX (unified memory)", device)
 
-        self._img_size = img_size
         self._use_refiner = use_refiner
-        self._model: GreenFormer = load_model(checkpoint, img_size=img_size, compile=compile)
+        self._tiled = bool(tile_size)
+        self._tile_size = tile_size or img_size
+        self._overlap = overlap
+
+        if self._tiled:
+            # Tiled: model runs at tile_size, input stays full-res
+            self._img_size = self._tile_size
+            self._model: GreenFormer = load_model(
+                checkpoint, img_size=self._tile_size, compile=False
+            )
+            logger.info(
+                "Tiled inference: tile_size=%d, overlap=%d", self._tile_size, self._overlap
+            )
+        else:
+            # Full-frame: resize input to img_size
+            self._img_size = img_size
+            self._model = load_model(checkpoint, img_size=img_size, compile=compile)
 
     def process_frame(
         self,
@@ -125,47 +156,58 @@ class CorridorKeyMLXEngine:
         if mask_f32.ndim == 2:
             mask_f32 = mask_f32[:, :, np.newaxis]
 
-        # -- resize to model resolution --
-        if rgb_f32.shape[0] != self._img_size or rgb_f32.shape[1] != self._img_size:
-            rgb_pil = Image.fromarray(image).resize(
-                (self._img_size, self._img_size), Image.Resampling.BICUBIC
+        if self._tiled:
+            # Tiled: keep full-res, preprocess, run tiled_inference
+            x = preprocess(rgb_f32, mask_f32)
+            outputs = tiled_inference(
+                self._model, x, tile_size=self._tile_size, overlap=self._overlap
             )
-            rgb_f32 = np.asarray(rgb_pil, dtype=np.float32) / 255.0
+            # NOTE: mx.eval is MLX array materialization, not Python eval()
+            mx.eval(outputs)  # noqa: S307
+        else:
+            # Full-frame: resize to model resolution
+            if rgb_f32.shape[0] != self._img_size or rgb_f32.shape[1] != self._img_size:
+                rgb_pil = Image.fromarray(image).resize(
+                    (self._img_size, self._img_size), Image.Resampling.BICUBIC
+                )
+                rgb_f32 = np.asarray(rgb_pil, dtype=np.float32) / 255.0
 
-            mask_u8 = mask_linear if mask_linear.ndim == 2 else mask_linear[:, :, 0]
-            mask_pil = Image.fromarray(mask_u8, mode="L").resize(
-                (self._img_size, self._img_size), Image.Resampling.BICUBIC
-            )
-            mask_f32 = np.asarray(mask_pil, dtype=np.float32)[:, :, np.newaxis] / 255.0
+                mask_u8 = mask_linear if mask_linear.ndim == 2 else mask_linear[:, :, 0]
+                mask_pil = Image.fromarray(mask_u8, mode="L").resize(
+                    (self._img_size, self._img_size), Image.Resampling.BICUBIC
+                )
+                mask_f32 = np.asarray(mask_pil, dtype=np.float32)[:, :, np.newaxis] / 255.0
 
-        # -- preprocess (ImageNet norm + concat) -> (1, H, W, 4) NHWC --
-        x = preprocess(rgb_f32, mask_f32)
-
-        # -- forward --
-        outputs = self._model(x)
-        mx.eval(outputs)  # noqa: S307 — mx.eval materializes lazy MLX arrays, not Python eval
+            x = preprocess(rgb_f32, mask_f32)
+            outputs = self._model(x)
+            # NOTE: mx.eval is MLX array materialization, not Python eval()
+            mx.eval(outputs)  # noqa: S307
 
         # -- select coarse vs refined --
-        alpha_coarse = outputs["alpha_coarse"]
-        fg_coarse = outputs["fg_coarse"]
-        alpha_refined = outputs["alpha_final"]
-        fg_refined = outputs["fg_final"]
+        if self._tiled:
+            # tiled_inference only returns final (refined) outputs
+            alpha_out = outputs["alpha_final"]
+            fg_out = outputs["fg_final"]
+        else:
+            alpha_coarse = outputs["alpha_coarse"]
+            fg_coarse = outputs["fg_coarse"]
+            alpha_refined = outputs["alpha_final"]
+            fg_refined = outputs["fg_final"]
 
-        # Release unused intermediate tensors (logits, delta_logits, etc.)
+            if not self._use_refiner or refiner_scale == 0.0:
+                alpha_out = alpha_coarse
+                fg_out = fg_coarse
+            elif refiner_scale == 1.0:
+                alpha_out = alpha_refined
+                fg_out = fg_refined
+            else:
+                s = refiner_scale
+                alpha_out = alpha_coarse * (1.0 - s) + alpha_refined * s
+                fg_out = fg_coarse * (1.0 - s) + fg_refined * s
+
+        # Release unused intermediate tensors
         del outputs
         gc.collect()
-
-        if not self._use_refiner or refiner_scale == 0.0:
-            alpha_out = alpha_coarse
-            fg_out = fg_coarse
-        elif refiner_scale == 1.0:
-            alpha_out = alpha_refined
-            fg_out = fg_refined
-        else:
-            # output-space lerp
-            s = refiner_scale
-            alpha_out = alpha_coarse * (1.0 - s) + alpha_refined * s
-            fg_out = fg_coarse * (1.0 - s) + fg_refined * s
 
         # -- postprocess to uint8 --
         alpha_u8 = postprocess_alpha(alpha_out)
