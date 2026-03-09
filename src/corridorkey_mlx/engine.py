@@ -26,6 +26,7 @@ from corridorkey_mlx.io.image import (
     postprocess_foreground,
     preprocess,
 )
+from corridorkey_mlx.io.preprocess_mlx import preprocess_mlx
 
 if TYPE_CHECKING:
     from corridorkey_mlx.model.corridorkey import GreenFormer
@@ -178,7 +179,7 @@ class CorridorKeyMLXEngine:
                 )
                 mask_f32 = np.asarray(mask_pil, dtype=np.float32)[:, :, np.newaxis] / 255.0
 
-            x = preprocess(rgb_f32, mask_f32)
+            x = preprocess_mlx(rgb_f32, mask_f32)
             outputs = self._model(x)
             # NOTE: mx.eval is MLX array materialization, not Python eval()
             mx.eval(outputs)  # noqa: S307
