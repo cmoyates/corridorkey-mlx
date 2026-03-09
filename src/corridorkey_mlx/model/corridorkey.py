@@ -36,10 +36,12 @@ class GreenFormer(nn.Module):
         img_size: int = 512,
         dtype: mx.Dtype = mx.float32,
         fused_decode: bool = False,
+        slim: bool = False,
     ) -> None:
         super().__init__()
         self._compute_dtype = dtype
         self._fused_decode = fused_decode
+        self._slim = slim
         self.backbone = HieraBackbone(img_size=img_size)
         self.alpha_decoder = DecoderHead(BACKBONE_CHANNELS, EMBED_DIM, output_dim=1)
         self.fg_decoder = DecoderHead(BACKBONE_CHANNELS, EMBED_DIM, output_dim=3)
@@ -99,6 +101,14 @@ class GreenFormer(nn.Module):
         # Final predictions: additive residual in logit space, then sigmoid
         alpha_final = mx.sigmoid(alpha_logits_up + delta_logits[:, :, :, 0:1])
         fg_final = mx.sigmoid(fg_logits_up + delta_logits[:, :, :, 1:4])
+
+        if self._slim:
+            return {
+                "alpha_coarse": alpha_coarse,
+                "fg_coarse": fg_coarse,
+                "alpha_final": alpha_final,
+                "fg_final": fg_final,
+            }
 
         return {
             "alpha_logits": alpha_logits.astype(mx.float32),

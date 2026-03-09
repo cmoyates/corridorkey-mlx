@@ -290,3 +290,49 @@ def test_fp32_default_unchanged() -> None:
             np.array(out_explicit[key]),
             err_msg=f"{key} differs between default and explicit fp32",
         )
+
+
+# ---------------------------------------------------------------------------
+# Slim forward mode
+# ---------------------------------------------------------------------------
+
+SLIM_KEYS = {"alpha_coarse", "fg_coarse", "alpha_final", "fg_final"}
+
+
+def test_slim_returns_four_keys() -> None:
+    """slim=True returns only the 4 final/coarse keys."""
+    model = GreenFormer(img_size=SMALL_IMG_SIZE, slim=True)
+    x = mx.random.normal((1, SMALL_IMG_SIZE, SMALL_IMG_SIZE, 4))
+    out = model(x)
+    # NOTE: mx.eval is MLX array materialization, not Python eval()
+    mx.eval(out)  # noqa: S307
+    assert set(out.keys()) == SLIM_KEYS
+
+
+def test_slim_matches_full_output() -> None:
+    """slim=True values match the corresponding keys from full output."""
+    from mlx.utils import tree_flatten
+
+    mx.random.seed(55)
+    x = mx.random.normal((1, SMALL_IMG_SIZE, SMALL_IMG_SIZE, 4))
+    # NOTE: mx.eval is MLX array materialization, not Python eval()
+    mx.eval(x)  # noqa: S307
+
+    model_full = GreenFormer(img_size=SMALL_IMG_SIZE, slim=False)
+    mx.eval(model_full.parameters())  # noqa: S307
+
+    model_slim = GreenFormer(img_size=SMALL_IMG_SIZE, slim=True)
+    model_slim.load_weights(tree_flatten(model_full.parameters()))  # type: ignore[arg-type]
+    mx.eval(model_slim.parameters())  # noqa: S307
+
+    out_full = model_full(x)
+    out_slim = model_slim(x)
+    mx.eval(out_full)  # noqa: S307
+    mx.eval(out_slim)  # noqa: S307
+
+    for key in SLIM_KEYS:
+        np.testing.assert_array_equal(
+            np.array(out_full[key]),
+            np.array(out_slim[key]),
+            err_msg=f"{key} differs between slim and full forward",
+        )

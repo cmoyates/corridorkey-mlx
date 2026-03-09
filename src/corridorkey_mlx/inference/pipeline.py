@@ -35,6 +35,7 @@ def load_model(
     shapeless: bool = False,
     dtype: mx.Dtype = mx.bfloat16,
     fused_decode: bool = True,
+    slim: bool = False,
 ) -> GreenFormer:
     """Build GreenFormer and load weights from safetensors checkpoint.
 
@@ -50,8 +51,10 @@ def load_model(
             backbone and sigmoid always stay fp32. All outputs are fp32.
         fused_decode: If True, batch alpha+fg decoder upsamples to reduce
             Metal dispatch calls. Bit-exact with unfused path.
+        slim: If True, forward returns only 4 final keys (drops intermediates).
+            Reduces reference lifetime so MLX can reclaim buffers sooner.
     """
-    model = GreenFormer(img_size=img_size, dtype=dtype, fused_decode=fused_decode)
+    model = GreenFormer(img_size=img_size, dtype=dtype, fused_decode=fused_decode, slim=slim)
     model.load_checkpoint(checkpoint)
     if compile:
         model = compile_model(model, shapeless=shapeless)
