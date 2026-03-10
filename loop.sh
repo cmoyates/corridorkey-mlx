@@ -214,11 +214,27 @@ for ((i=1; i<=ITERATIONS; i++)); do
   # Build dynamic prompt and invoke Claude
   PROMPT="$(build_prompt)"
   echo "[claude] Invoking stateless mutation proposer..."
-  timeout "$CLAUDE_TIMEOUT" claude -p "$PROMPT" \
+  claude -p "$PROMPT" \
     --no-session-persistence \
     --output-format json \
     --allowedTools "Read,Edit,Write,Bash,Grep,Glob" \
-    > "$RUNS_DIR/claude-output-$i.json" 2>&1 || true
+    --max-turns 50 \
+    > "$RUNS_DIR/claude-output-$i.json" 2>&1 &
+  CLAUDE_PID=$!
+
+  # Timeout guard (macOS has no `timeout` command)
+  (
+    sleep "$CLAUDE_TIMEOUT"
+    if kill -0 "$CLAUDE_PID" 2>/dev/null; then
+      echo "[timeout] Claude exceeded ${CLAUDE_TIMEOUT}s — killing."
+      kill "$CLAUDE_PID" 2>/dev/null
+    fi
+  ) &
+  TIMER_PID=$!
+
+  wait "$CLAUDE_PID" 2>/dev/null || true
+  kill "$TIMER_PID" 2>/dev/null || true
+  wait "$TIMER_PID" 2>/dev/null || true
 
   # --- Gate 1: Validate decision schema ---
   echo "[gate] Validating decision.json..."
