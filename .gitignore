@@ -31,3 +31,7 @@ artifacts/
 .DS_Store
 
 *.safetensors*
+
+# Research lab artifacts (machine-local, not committed)
+research/artifacts/
+research/best_result.json
