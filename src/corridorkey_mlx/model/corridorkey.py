@@ -122,12 +122,10 @@ class GreenFormer(nn.Module):
         alpha_coarse = mx.sigmoid(alpha_logits_up)
         fg_coarse = mx.sigmoid(fg_logits_up)
 
-        # Materialize decoder output so MLX can free decoder graph nodes.
-        # NOTE: mx.eval is MLX array materialization, not Python eval()
-        if self._stage_gc and not self._compiled:
-            mx.eval(alpha_coarse, fg_coarse, alpha_logits_up, fg_logits_up)  # noqa: S307
-            gc.collect()
-            mx.clear_cache()
+        # Skip decoder→refiner materialization barrier: decoder outputs are
+        # small (~8MB at 512²) so keeping them lazy lets MLX fuse sigmoid +
+        # concatenation + refiner stem conv into fewer Metal dispatches.
+        # The backbone barrier above is sufficient to reclaim large feature maps.
 
         # Refiner receives coarse predictions (optionally in reduced precision)
         rgb = x[:, :, :, :3]  # (B, H, W, 3)
