@@ -67,6 +67,10 @@ uv run ty check              # type check
 - `scripts/bench_optimizations.py` — optimization matrix truth source
 - `scripts/score_experiment.py` — scoring logic
 - `scripts/run_research_experiment.py` — experiment runner
+- `scripts/validate_decision.py` — decision schema validator
+- `scripts/check_protected_surfaces.py` — protected surface guard
+- `loop.sh` — orchestrator (shell-driven loop)
+- `research/decision.schema.json` — decision output contract
 - `research/benchmark_spec.md` — benchmark spec
 - `reference/fixtures/golden.npz` — golden reference
 - `tests/` — existing parity/unit tests

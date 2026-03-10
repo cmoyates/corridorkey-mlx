@@ -17,7 +17,11 @@ PROTECTED_FILES = {
     "scripts/bench_optimizations.py",
     "scripts/score_experiment.py",
     "scripts/run_research_experiment.py",
+    "scripts/validate_decision.py",
+    "scripts/check_protected_surfaces.py",
     "research/benchmark_spec.md",
+    "loop.sh",
+    "research/decision.schema.json",
 }
 
 PROTECTED_DIRS = {
