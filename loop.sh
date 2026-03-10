@@ -82,8 +82,15 @@ log_iteration() {
 }
 
 revert_changes() {
+  # Preserve experiment log + best result across reverts
+  cp "$ROOT/research/experiments.jsonl" /tmp/_exp_jsonl_backup 2>/dev/null || true
+  cp "$ROOT/research/best_result.json" /tmp/_best_result_backup 2>/dev/null || true
+  cp -r "$ROOT/research/compound" /tmp/_compound_backup 2>/dev/null || true
   git -C "$ROOT" checkout -- . 2>/dev/null || true
   git -C "$ROOT" clean -fd -q 2>/dev/null || true
+  cp /tmp/_exp_jsonl_backup "$ROOT/research/experiments.jsonl" 2>/dev/null || true
+  cp /tmp/_best_result_backup "$ROOT/research/best_result.json" 2>/dev/null || true
+  cp -r /tmp/_compound_backup "$ROOT/research/compound" 2>/dev/null || true
 }
 
 iter_cleanup() {
@@ -133,8 +140,17 @@ build_prompt() {
   # Current best result
   best_result="$(cat "$ROOT/research/best_result.json" 2>/dev/null || echo "(no best result yet)")"
 
-  # Compound notes index
-  compound_index="$(ls "$ROOT/research/compound/"*.md 2>/dev/null | while read -r f; do basename "$f"; done || echo "(none)")"
+  # Compound notes — last 3 full contents (most recent learnings)
+  local compound_notes=""
+  if ls "$ROOT/research/compound/"*.md 1>/dev/null 2>&1; then
+    compound_notes="$(ls -t "$ROOT/research/compound/"*.md | head -3 | while read -r f; do
+      echo "### $(basename "$f")"
+      cat "$f"
+      echo ""
+    done)"
+  else
+    compound_notes="(no compound notes yet)"
+  fi
 
   cat <<PROMPT
 You are a stateless MLX optimization engineer. You will propose exactly one
@@ -182,8 +198,8 @@ $best_result
 ## Recent experiments (last 5)
 $last_experiments
 
-## Compound notes (research/compound/)
-$compound_index
+## Compound learnings (MUST READ — do not repeat failed approaches)
+$compound_notes
 
 ## Allowed search areas
 1. tile-lifecycle-memory — del refs, gc timing, avoid redundant allocs in tiled loops
@@ -293,8 +309,22 @@ for ((i=1; i<=ITERATIONS; i++)); do
   if ! uv run python "$ROOT/scripts/run_research_experiment.py" \
     --experiment-name "$EXP_NAME" \
     --output "$RESULT_FILE"; then
-    echo "[FAIL] Fidelity gate failed. Reverting."
+    echo ""
+    echo "FIDELITY FAILED — candidate must be reverted"
+    # Archive decision before revert destroys it
+    cp "$DECISION_PATH" "$RUNS_DIR/decision-$i.json" 2>/dev/null || true
+    # Log fidelity failure to experiment history (result file exists even on failure)
+    if [[ -f "$RESULT_FILE" ]]; then
+      uv run python "$ROOT/scripts/summarize_experiment.py" \
+        --result "$RESULT_FILE" --verdict REVERT --notes "fidelity failure, loop iteration $i"
+    fi
     revert_changes
+    # Compound: capture learning from fidelity failure
+    if [[ -f "$RESULT_FILE" ]] && [[ -f "$RUNS_DIR/decision-$i.json" ]]; then
+      uv run python "$ROOT/scripts/compound_note.py" \
+        --result "$RESULT_FILE" --decision "$RUNS_DIR/decision-$i.json" \
+        --verdict REVERT --notes "fidelity failure, loop iteration $i"
+    fi
     STALLS=$((STALLS + 1)); STALL_TYPE="fidelity"
     log_iteration "$i" "REVERT" "fidelity_failure" "$EXP_NAME"
     iter_cleanup
@@ -364,6 +394,13 @@ for ((i=1; i<=ITERATIONS; i++)); do
 
   # Archive decision
   cp "$DECISION_PATH" "$RUNS_DIR/decision-$i.json" 2>/dev/null || true
+
+  # --- Compound: capture learning from this iteration ---
+  if [[ -f "$RESULT_FILE" ]] && [[ -f "$RUNS_DIR/decision-$i.json" ]]; then
+    uv run python "$ROOT/scripts/compound_note.py" \
+      --result "$RESULT_FILE" --decision "$RUNS_DIR/decision-$i.json" \
+      --verdict "$VERDICT" --score "$SCORE" --notes "loop iteration $i"
+  fi
 
   # Cleanup between iterations
   iter_cleanup
