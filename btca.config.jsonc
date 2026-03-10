@@ -1,0 +1,28 @@
+{
+  "$schema": "https://btca.dev/btca.schema.json",
+  "resources": [
+    {
+      "type": "git",
+      "name": "mlx",
+      "url": "https://github.com/ml-explore/mlx",
+      "branch": "main",
+      "specialNotes": "This is the MLX source code repo"
+    },
+    {
+      "type": "git",
+      "name": "mlxExamples",
+      "url": "https://github.com/ml-explore/mlx-examples",
+      "branch": "main",
+      "specialNotes": "This is the MLX examples repo"
+    },
+    {
+      "type": "git",
+      "name": "corridorKey",
+      "url": "https://github.com/nikopueringer/CorridorKey",
+      "branch": "main",
+      "specialNotes": "This is the main CorridorKey repo. It doesn't include the MLX stuff."
+    }
+  ],
+  "model": "gemini-3-flash-preview",
+  "provider": "google"
+}
