@@ -43,6 +43,7 @@ class GreenFormer(nn.Module):
         refiner_dtype: mx.Dtype | None = None,
         compile_refiner: bool = True,
         compile_decoders: bool = True,
+        compile_backbone: bool = True,
     ) -> None:
         super().__init__()
         self._compute_dtype = dtype
@@ -53,6 +54,7 @@ class GreenFormer(nn.Module):
         self._refiner_dtype = refiner_dtype
         self._compile_refiner = compile_refiner
         self._compile_decoders = compile_decoders
+        self._compile_backbone = compile_backbone
         self.backbone = HieraBackbone(img_size=img_size, use_sdpa=use_sdpa)
         self.alpha_decoder = DecoderHead(BACKBONE_CHANNELS, EMBED_DIM, output_dim=1)
         self.fg_decoder = DecoderHead(BACKBONE_CHANNELS, EMBED_DIM, output_dim=3)
@@ -61,6 +63,7 @@ class GreenFormer(nn.Module):
         self._compiled_alpha_decoder_call = None
         self._compiled_fg_decoder_call = None
         self._compiled_fused_pair_call = None
+        self._compiled_backbone_call = None
 
         if fused_decode:
             self._fused_pair = FusedDecoderPair(self.alpha_decoder, self.fg_decoder)
@@ -82,7 +85,8 @@ class GreenFormer(nn.Module):
             All tensors in NHWC format.
         """
         # Backbone always runs in fp32
-        features = self.backbone(x)
+        backbone_fn = self._compiled_backbone_call or self.backbone
+        features = backbone_fn(x)
 
         # Materialize backbone output so MLX can free intermediate graph nodes.
         # NOTE: mx.eval is MLX array materialization, not Python eval()
@@ -202,6 +206,12 @@ class GreenFormer(nn.Module):
         self.eval()
         # materialize all parameters — mx.eval is MLX array materialization
         mx.eval(self.parameters())  # noqa: S307
+
+        # Compile backbone after weights are materialized — at fixed img_size
+        # all shapes are deterministic (unroll/reroll use precomputed schedules),
+        # so mx.compile can fuse the 24-block transformer into fewer Metal dispatches.
+        if self._compile_backbone:
+            self._compiled_backbone_call = mx.compile(self.backbone.__call__)
 
         # Compile refiner after weights are materialized — CNN has no
         # shape-dependent logic so fixed-shape compile is safe and fuses
