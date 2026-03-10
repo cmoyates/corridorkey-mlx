@@ -41,6 +41,7 @@ class GreenFormer(nn.Module):
         use_sdpa: bool = True,
         stage_gc: bool = True,
         refiner_dtype: mx.Dtype | None = None,
+        compile_refiner: bool = True,
     ) -> None:
         super().__init__()
         self._compute_dtype = dtype
@@ -49,10 +50,12 @@ class GreenFormer(nn.Module):
         self._stage_gc = stage_gc
         self._compiled = False
         self._refiner_dtype = refiner_dtype
+        self._compile_refiner = compile_refiner
         self.backbone = HieraBackbone(img_size=img_size, use_sdpa=use_sdpa)
         self.alpha_decoder = DecoderHead(BACKBONE_CHANNELS, EMBED_DIM, output_dim=1)
         self.fg_decoder = DecoderHead(BACKBONE_CHANNELS, EMBED_DIM, output_dim=3)
         self.refiner = CNNRefinerModule()
+        self._compiled_refiner_call = None
 
         if fused_decode:
             self._fused_pair = FusedDecoderPair(self.alpha_decoder, self.fg_decoder)
@@ -121,13 +124,14 @@ class GreenFormer(nn.Module):
         # Refiner receives coarse predictions (optionally in reduced precision)
         rgb = x[:, :, :, :3]  # (B, H, W, 3)
         coarse_pred = mx.concatenate([alpha_coarse, fg_coarse], axis=-1)  # (B, H, W, 4)
+        refiner_fn = self._compiled_refiner_call or self.refiner
         if self._refiner_dtype is not None:
             rgb_r = rgb.astype(self._refiner_dtype)
             coarse_r = coarse_pred.astype(self._refiner_dtype)
-            delta_logits = self.refiner(rgb_r, coarse_r).astype(mx.float32)  # (B, H, W, 4)
+            delta_logits = refiner_fn(rgb_r, coarse_r).astype(mx.float32)  # (B, H, W, 4)
             del rgb_r, coarse_r
         else:
-            delta_logits = self.refiner(rgb, coarse_pred)  # (B, H, W, 4)
+            delta_logits = refiner_fn(rgb, coarse_pred)  # (B, H, W, 4)
 
         # Final predictions: additive residual in logit space, then sigmoid
         alpha_final = mx.sigmoid(alpha_logits_up + delta_logits[:, :, :, 0:1])
@@ -190,5 +194,11 @@ class GreenFormer(nn.Module):
 
         self.load_weights(weight_pairs)
         self.eval()
-        # materialize all parameters
+        # materialize all parameters — mx.eval is MLX array materialization
         mx.eval(self.parameters())  # noqa: S307
+
+        # Compile refiner after weights are materialized — CNN has no
+        # shape-dependent logic so fixed-shape compile is safe and fuses
+        # Metal kernels at full resolution where bandwidth matters most.
+        if self._compile_refiner:
+            self._compiled_refiner_call = mx.compile(self.refiner.__call__)
