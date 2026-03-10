@@ -159,7 +159,7 @@ def tiled_inference(
             weight_accum[y_start:y_end, x_start:x_end, :] += w3d
 
             # Deterministic memory cleanup — release MLX graph refs between tiles
-            del out, tile, alpha_tile, fg_tile
+            del out, tile, alpha_tile, fg_tile, w, w3d
             gc.collect()
             mx.clear_cache()
 

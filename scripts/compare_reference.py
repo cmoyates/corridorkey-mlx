@@ -22,6 +22,7 @@ from rich.table import Table
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from corridorkey_mlx.model.corridorkey import GreenFormer
+from corridorkey_mlx.utils.layout import nchw_to_nhwc_np, nhwc_to_nchw_np
 
 console = Console()
 
@@ -66,7 +67,8 @@ def main() -> None:
     model.load_checkpoint(args.checkpoint)
 
     if "input" in ref:
-        x = mx.array(ref["input"])
+        # Golden fixture stores NCHW (PyTorch); model expects NHWC
+        x = mx.array(nchw_to_nhwc_np(ref["input"]))
     else:
         console.print("[yellow]No 'input' key in fixture, using random input[/yellow]")
         mx.random.seed(42)
@@ -92,7 +94,8 @@ def main() -> None:
             continue
 
         ref_tensor = ref[ref_key]
-        mlx_tensor = np.array(outputs[mlx_key])
+        # MLX outputs are NHWC; golden refs are NCHW — convert for comparison
+        mlx_tensor = nhwc_to_nchw_np(np.array(outputs[mlx_key]))
 
         if ref_tensor.shape != mlx_tensor.shape:
             table.add_row(

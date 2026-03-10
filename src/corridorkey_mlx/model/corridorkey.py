@@ -92,6 +92,10 @@ class GreenFormer(nn.Module):
             alpha_logits = self.alpha_decoder(features)  # (B, H/4, W/4, 1)
             fg_logits = self.fg_decoder(features)  # (B, H/4, W/4, 3)
 
+        # Free backbone feature maps — decoders consumed them,
+        # refiner uses rgb+coarse_pred only
+        del features
+
         # Upsample logits to full input resolution (4x from stride-4 decoder)
         alpha_logits_up = self._logit_upsampler(alpha_logits)  # (B, H, W, 1)
         fg_logits_up = self._logit_upsampler(fg_logits)  # (B, H, W, 3)

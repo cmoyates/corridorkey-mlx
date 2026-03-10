@@ -26,6 +26,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from corridorkey_mlx.model.corridorkey import GreenFormer
+from corridorkey_mlx.utils.layout import nchw_to_nhwc_np, nhwc_to_nchw_np
 
 ARTIFACTS_DIR = Path("research/artifacts")
 DEFAULT_CHECKPOINT = Path("checkpoints/corridorkey_mlx.safetensors")
@@ -86,7 +87,8 @@ def run_parity(
     ref = np.load(str(fixture_path))
 
     if "input" in ref:
-        x = mx.array(ref["input"])
+        # Golden fixture stores NCHW (PyTorch); model expects NHWC
+        x = mx.array(nchw_to_nhwc_np(ref["input"]))
     else:
         mx.random.seed(42)
         x = mx.random.normal((1, img_size, img_size, 4))
@@ -101,7 +103,8 @@ def run_parity(
             continue
 
         ref_tensor = ref[key]
-        mlx_tensor = np.array(outputs[key])
+        # MLX outputs are NHWC; golden refs are NCHW — convert for comparison
+        mlx_tensor = nhwc_to_nchw_np(np.array(outputs[key]))
 
         if ref_tensor.shape != mlx_tensor.shape:
             results[key] = {
