@@ -40,6 +40,7 @@ class GreenFormer(nn.Module):
         slim: bool = False,
         use_sdpa: bool = True,
         stage_gc: bool = True,
+        refiner_dtype: mx.Dtype | None = None,
     ) -> None:
         super().__init__()
         self._compute_dtype = dtype
@@ -47,6 +48,7 @@ class GreenFormer(nn.Module):
         self._slim = slim
         self._stage_gc = stage_gc
         self._compiled = False
+        self._refiner_dtype = refiner_dtype
         self.backbone = HieraBackbone(img_size=img_size, use_sdpa=use_sdpa)
         self.alpha_decoder = DecoderHead(BACKBONE_CHANNELS, EMBED_DIM, output_dim=1)
         self.fg_decoder = DecoderHead(BACKBONE_CHANNELS, EMBED_DIM, output_dim=3)
@@ -116,10 +118,16 @@ class GreenFormer(nn.Module):
             gc.collect()
             mx.clear_cache()
 
-        # Refiner receives fp32 coarse predictions
+        # Refiner receives coarse predictions (optionally in reduced precision)
         rgb = x[:, :, :, :3]  # (B, H, W, 3)
         coarse_pred = mx.concatenate([alpha_coarse, fg_coarse], axis=-1)  # (B, H, W, 4)
-        delta_logits = self.refiner(rgb, coarse_pred)  # (B, H, W, 4)
+        if self._refiner_dtype is not None:
+            rgb_r = rgb.astype(self._refiner_dtype)
+            coarse_r = coarse_pred.astype(self._refiner_dtype)
+            delta_logits = self.refiner(rgb_r, coarse_r).astype(mx.float32)  # (B, H, W, 4)
+            del rgb_r, coarse_r
+        else:
+            delta_logits = self.refiner(rgb, coarse_pred)  # (B, H, W, 4)
 
         # Final predictions: additive residual in logit space, then sigmoid
         alpha_final = mx.sigmoid(alpha_logits_up + delta_logits[:, :, :, 0:1])
@@ -173,7 +181,14 @@ class GreenFormer(nn.Module):
 
                 weight_pairs.append((mlx_key, tensor))
 
+        # Cast refiner weights to reduced precision at load time
+        if self._refiner_dtype is not None:
+            weight_pairs = [
+                (k, v.astype(self._refiner_dtype)) if k.startswith("refiner.") else (k, v)
+                for k, v in weight_pairs
+            ]
+
         self.load_weights(weight_pairs)
         self.eval()
         # materialize all parameters
-        mx.eval(self.parameters())
+        mx.eval(self.parameters())  # noqa: S307

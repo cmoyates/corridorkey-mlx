@@ -38,6 +38,7 @@ def load_model(
     slim: bool = False,
     use_sdpa: bool = True,
     stage_gc: bool = True,
+    refiner_dtype: mx.Dtype | None = mx.float16,
 ) -> GreenFormer:
     """Build GreenFormer and load weights from safetensors checkpoint.
 
@@ -57,6 +58,8 @@ def load_model(
             Reduces reference lifetime so MLX can reclaim buffers sooner.
         use_sdpa: If True, use mx.fast.scaled_dot_product_attention in backbone.
         stage_gc: If True, materialize + GC at backbone/decoder/refiner boundaries.
+        refiner_dtype: Dtype for refiner weights+activations. float16 halves
+            bandwidth at full resolution. None = same as backbone (fp32).
     """
     model = GreenFormer(
         img_size=img_size,
@@ -65,6 +68,7 @@ def load_model(
         slim=slim,
         use_sdpa=use_sdpa,
         stage_gc=stage_gc,
+        refiner_dtype=refiner_dtype,
     )
     model.load_checkpoint(checkpoint)
     if compile:
