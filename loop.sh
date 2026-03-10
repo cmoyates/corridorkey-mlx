@@ -141,15 +141,22 @@ You are a stateless MLX optimization engineer. You will propose exactly one
 bounded code mutation for corridorkey-mlx. You do NOT run benchmarks — the
 orchestrator does that after you exit.
 
+CRITICAL REQUIREMENT: You MUST use the Write tool to create the file
+artifacts/latest_decision.json before you finish. The loop WILL FAIL if this
+file does not exist. This is your primary deliverable — code changes without
+this file are worthless.
+
 ## Your contract
 1. Read CLAUDE.md and research/program.md to understand the project.
 2. Read relevant source files you plan to modify.
 3. Choose one experiment from the allowed search areas below.
 4. Implement the minimal code change (one variable at a time).
-5. Write artifacts/latest_decision.json conforming to the schema below.
+5. MANDATORY: Write artifacts/latest_decision.json (see schema below).
 6. Exit immediately. Do NOT run any benchmark or scoring scripts.
 
-## Decision schema (write to artifacts/latest_decision.json)
+## Decision schema — MUST write to artifacts/latest_decision.json
+Use the Write tool to create this file with valid JSON containing:
+
 Required fields:
   - experiment_name: string (kebab-case, descriptive)
   - hypothesis: string (>= 10 chars, what + why)
@@ -160,6 +167,14 @@ Optional fields:
   - notes: string (caveats, context)
 
 Do NOT include status, verdict, score, or benchmark results.
+
+Example (artifacts/latest_decision.json):
+{
+  "experiment_name": "refiner-bf16-weights",
+  "hypothesis": "Cast refiner weights to bf16 to halve memory bandwidth at full resolution",
+  "files_changed": ["src/corridorkey_mlx/model/corridorkey.py"],
+  "search_area": "selective-precision"
+}
 
 ## Current best result
 $best_result
@@ -186,6 +201,9 @@ $compound_index
   score_experiment.py, or any benchmark/scoring script
 - One optimization variable per experiment
 - If no viable experiment remains, write decision.json with notes explaining why
+
+REMINDER: Your FINAL action before exiting MUST be writing artifacts/latest_decision.json
+using the Write tool. Without this file, your entire session is wasted.
 PROMPT
 }
 
@@ -218,7 +236,7 @@ for ((i=1; i<=ITERATIONS; i++)); do
     --no-session-persistence \
     --output-format json \
     --allowedTools "Read,Edit,Write,Bash,Grep,Glob" \
-    --max-turns 50 \
+    --max-turns 25 \
     > "$RUNS_DIR/claude-output-$i.json" 2>&1 &
   CLAUDE_PID=$!
 
