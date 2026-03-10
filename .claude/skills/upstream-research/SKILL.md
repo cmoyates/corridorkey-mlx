@@ -16,7 +16,10 @@ Read-only research skill for exploring upstream CorridorKey, MLX source, and MLX
 Check `btca.config.jsonc` for configured repos:
 - `mlx` — MLX framework source
 - `mlxExamples` — MLX examples repo
-- `corridorKey` — upstream CorridorKey repo
+- `corridorKey` — upstream CorridorKey repo (nikopueringer)
+- `corridorKeyEngine` — CorridorKey Engine (99oblivius)
+- `corridorKeyMarcel` — Marcel Lieb's CorridorKey fork
+- `ezCorridorKey` — EZ-CorridorKey (edenaion)
 
 ## Without BTCA
 Fall back to:

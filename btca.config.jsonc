@@ -21,6 +21,27 @@
       "url": "https://github.com/nikopueringer/CorridorKey",
       "branch": "main",
       "specialNotes": "This is the main CorridorKey repo. It doesn't include the MLX stuff."
+    },
+    {
+      "type": "git",
+      "name": "corridorKeyEngine",
+      "url": "https://github.com/99oblivius/CorridorKey-Engine",
+      "branch": "main",
+      "specialNotes": "CorridorKey Engine — community implementation"
+    },
+    {
+      "type": "git",
+      "name": "corridorKeyMarcel",
+      "url": "https://github.com/MarcelLieb/CorridorKey",
+      "branch": "main",
+      "specialNotes": "Marcel Lieb's CorridorKey fork"
+    },
+    {
+      "type": "git",
+      "name": "ezCorridorKey",
+      "url": "https://github.com/edenaion/EZ-CorridorKey",
+      "branch": "main",
+      "specialNotes": "EZ-CorridorKey — simplified CorridorKey implementation"
     }
   ],
   "model": "gemini-3-flash-preview",
