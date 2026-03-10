@@ -42,6 +42,7 @@ class GreenFormer(nn.Module):
         stage_gc: bool = True,
         refiner_dtype: mx.Dtype | None = None,
         compile_refiner: bool = True,
+        compile_decoders: bool = True,
     ) -> None:
         super().__init__()
         self._compute_dtype = dtype
@@ -51,11 +52,15 @@ class GreenFormer(nn.Module):
         self._compiled = False
         self._refiner_dtype = refiner_dtype
         self._compile_refiner = compile_refiner
+        self._compile_decoders = compile_decoders
         self.backbone = HieraBackbone(img_size=img_size, use_sdpa=use_sdpa)
         self.alpha_decoder = DecoderHead(BACKBONE_CHANNELS, EMBED_DIM, output_dim=1)
         self.fg_decoder = DecoderHead(BACKBONE_CHANNELS, EMBED_DIM, output_dim=3)
         self.refiner = CNNRefinerModule()
         self._compiled_refiner_call = None
+        self._compiled_alpha_decoder_call = None
+        self._compiled_fg_decoder_call = None
+        self._compiled_fused_pair_call = None
 
         if fused_decode:
             self._fused_pair = FusedDecoderPair(self.alpha_decoder, self.fg_decoder)
@@ -92,10 +97,13 @@ class GreenFormer(nn.Module):
 
         # Decoder heads -> logits at H/4 resolution
         if self._fused_decode:
-            alpha_logits, fg_logits = self._fused_pair(features)
+            fused_fn = self._compiled_fused_pair_call or self._fused_pair
+            alpha_logits, fg_logits = fused_fn(features)
         else:
-            alpha_logits = self.alpha_decoder(features)  # (B, H/4, W/4, 1)
-            fg_logits = self.fg_decoder(features)  # (B, H/4, W/4, 3)
+            alpha_fn = self._compiled_alpha_decoder_call or self.alpha_decoder
+            fg_fn = self._compiled_fg_decoder_call or self.fg_decoder
+            alpha_logits = alpha_fn(features)  # (B, H/4, W/4, 1)
+            fg_logits = fg_fn(features)  # (B, H/4, W/4, 3)
 
         # Free backbone feature maps — decoders consumed them,
         # refiner uses rgb+coarse_pred only
@@ -202,3 +210,12 @@ class GreenFormer(nn.Module):
         # Metal kernels at full resolution where bandwidth matters most.
         if self._compile_refiner:
             self._compiled_refiner_call = mx.compile(self.refiner.__call__)
+
+        # Compile decoder heads — fixed shapes at a given resolution,
+        # fuses linear projections + upsample + conv fusion into fewer Metal dispatches.
+        if self._compile_decoders:
+            if self._fused_decode:
+                self._compiled_fused_pair_call = mx.compile(self._fused_pair.__call__)
+            else:
+                self._compiled_alpha_decoder_call = mx.compile(self.alpha_decoder.__call__)
+                self._compiled_fg_decoder_call = mx.compile(self.fg_decoder.__call__)
