@@ -152,22 +152,21 @@ Adapt your approach based on this error. Do NOT retry the exact same experiment.
   # Current best result
   best_result="$(cat "$ROOT/research/best_result.json" 2>/dev/null || echo "(no best result yet)")"
 
-  # Compound notes — ALL notes, newest first, capped at 60 lines each
-  local compound_notes=""
-  local max_lines_per_note=60
+  # Compound notes — build compact index (title + verdict per file)
+  local compound_index=""
   if ls "$ROOT/research/compound/"*.md 1>/dev/null 2>&1; then
-    compound_notes="$(ls -t "$ROOT/research/compound/"*.md | while read -r f; do
-      echo "### $(basename "$f")"
-      head -n "$max_lines_per_note" "$f"
-      local total_lines
-      total_lines="$(wc -l < "$f")"
-      if (( total_lines > max_lines_per_note )); then
-        echo "... (truncated, $((total_lines - max_lines_per_note)) more lines)"
+    compound_index="$(ls -t "$ROOT/research/compound/"*.md | while read -r f; do
+      local title verdict
+      title="$(head -1 "$f" | sed 's/^# //')"
+      verdict="$(grep -m1 '^\*\*Verdict:\*\*' "$f" 2>/dev/null | sed 's/\*\*Verdict:\*\* //' || echo "")"
+      if [[ -n "$verdict" ]]; then
+        echo "- $(basename "$f"): $title [$verdict]"
+      else
+        echo "- $(basename "$f"): $title"
       fi
-      echo ""
     done)"
   else
-    compound_notes="(no compound notes yet)"
+    compound_index="(no compound notes yet)"
   fi
 
   cat <<PROMPT
@@ -182,11 +181,13 @@ this file are worthless.
 
 ## Your contract
 1. Read CLAUDE.md and research/program.md to understand the project.
-2. Read relevant source files you plan to modify.
-3. Choose one experiment from the allowed search areas below.
-4. Implement the minimal code change (one variable at a time).
-5. MANDATORY: Write artifacts/latest_decision.json (see schema below).
-6. Exit immediately. Do NOT run any benchmark or scoring scripts.
+2. Search research/compound/ for learnings related to your planned experiment.
+   Use Grep to find relevant notes, then Read the matching files.
+3. Read relevant source files you plan to modify.
+4. Choose one experiment from the allowed search areas below.
+5. Implement the minimal code change (one variable at a time).
+6. MANDATORY: Write artifacts/latest_decision.json (see schema below).
+7. Exit immediately. Do NOT run any benchmark or scoring scripts.
 
 ## Decision schema — MUST write to artifacts/latest_decision.json
 Use the Write tool to create this file with valid JSON containing:
@@ -216,12 +217,16 @@ $best_result
 ## Recent experiments (last 5)
 $last_experiments
 
-## Compound learnings (MUST READ EVERY NOTE — do not repeat failed approaches)
-CRITICAL: These notes contain hard-won lessons from previous iterations.
-Repeating a failed approach wastes an iteration. Read ALL notes below before
-choosing your experiment.
+## Compound learnings (do not repeat failed approaches)
+The directory research/compound/ contains hard-won lessons from previous
+experiments. BEFORE choosing your experiment, you MUST:
+1. Use Grep to search research/compound/ for keywords related to your planned
+   search area (e.g., "quantiz", "bf16", "refiner", "compile", "fidelity")
+2. Use Read to read any matching files in full
+3. Do NOT repeat any approach marked as failed/reverted/error
 
-$compound_notes
+Available notes:
+$compound_index
 
 ## Allowed search areas
 1. tile-lifecycle-memory — del refs, gc timing, avoid redundant allocs in tiled loops
