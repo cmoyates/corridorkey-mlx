@@ -16,13 +16,35 @@ from safetensors import safe_open
 from corridorkey_mlx.model.backbone import HieraBackbone
 from corridorkey_mlx.model.decoder import DecoderHead, FusedDecoderPair
 from corridorkey_mlx.model.hiera import ENCODER_KEY_PREFIX, _interpolate_pos_embed, _prod
-from corridorkey_mlx.model.refiner import CNNRefinerModule
+from corridorkey_mlx.model.refiner import REFINER_DILATIONS, CNNRefinerModule, inflate_dilated_kernel
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 BACKBONE_CHANNELS = [112, 224, 448, 896]
 EMBED_DIM = 256
+
+
+def _inflate_refiner_weights(
+    weight_pairs: list[tuple[str, mx.array]],
+) -> list[tuple[str, mx.array]]:
+    """Inflate dilated conv weights in refiner blocks to eliminate dilation.
+
+    Maps 3x3 dilated weights to (2d+1)x(2d+1) standard weights by inserting
+    zeros at strided positions. The math is identical; this just enables
+    implicit GEMM dispatch in MLX (avoids im2col fallback for dilated convs).
+    """
+    result = []
+    for key, tensor in weight_pairs:
+        # Match refiner.res{2,3,4}.conv{1,2}.weight
+        if key.startswith("refiner.res") and ".conv" in key and key.endswith(".weight"):
+            # Extract block number: "refiner.res2.conv1.weight" → 2
+            block_num = int(key.split(".")[1][3:])
+            dilation = REFINER_DILATIONS.get(block_num, 1)
+            if dilation > 1:
+                tensor = inflate_dilated_kernel(tensor, dilation)
+        result.append((key, tensor))
+    return result
 
 
 class GreenFormer(nn.Module):
@@ -45,6 +67,7 @@ class GreenFormer(nn.Module):
         compile_decoders: bool = True,
         compile_backbone: bool = True,
         compile_forward: bool = True,
+        inflate_dilated: bool = True,
     ) -> None:
         super().__init__()
         self._compute_dtype = dtype
@@ -57,10 +80,11 @@ class GreenFormer(nn.Module):
         self._compile_decoders = compile_decoders
         self._compile_backbone = compile_backbone
         self._compile_forward = compile_forward
+        self._inflate_dilated = inflate_dilated
         self.backbone = HieraBackbone(img_size=img_size, use_sdpa=use_sdpa)
         self.alpha_decoder = DecoderHead(BACKBONE_CHANNELS, EMBED_DIM, output_dim=1)
         self.fg_decoder = DecoderHead(BACKBONE_CHANNELS, EMBED_DIM, output_dim=3)
-        self.refiner = CNNRefinerModule()
+        self.refiner = CNNRefinerModule(inflate_dilated=inflate_dilated)
         self._compiled_refiner_call = None
         self._compiled_alpha_decoder_call = None
         self._compiled_fg_decoder_call = None
@@ -196,6 +220,11 @@ class GreenFormer(nn.Module):
                     mlx_key = full_key
 
                 weight_pairs.append((mlx_key, tensor))
+
+        # Inflate dilated conv weights so the standard (non-dilated) convs
+        # receive the mathematically equivalent inflated kernels
+        if self._inflate_dilated:
+            weight_pairs = _inflate_refiner_weights(weight_pairs)
 
         # Cast refiner weights to reduced precision at load time
         if self._refiner_dtype is not None:
