@@ -122,6 +122,7 @@ if [[ ! -f "$BASELINE_PATH" ]]; then
   echo "========================================"
   if ! uv run python "$ROOT/scripts/run_research_experiment.py" \
     --experiment-name "baseline" \
+    --resolution 1024 \
     --output "$BASELINE_PATH"; then
     echo "Baseline capture failed (fidelity check). Cannot start loop."
     exit 1
@@ -446,6 +447,7 @@ for ((i=1; i<=ITERATIONS; i++)); do
   set +o pipefail
   uv run python "$ROOT/scripts/run_research_experiment.py" \
     --experiment-name "$EXP_NAME" \
+    --resolution 1024 \
     --output "$RESULT_FILE" 2>&1 | tee "$GATE3_LOG"
   GATE3_EXIT="${PIPESTATUS[0]}"
   set -o pipefail
