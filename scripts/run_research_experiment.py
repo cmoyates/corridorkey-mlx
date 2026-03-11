@@ -32,8 +32,8 @@ ARTIFACTS_DIR = Path("research/artifacts")
 DEFAULT_CHECKPOINT = Path("checkpoints/corridorkey_mlx.safetensors")
 DEFAULT_FIXTURE = Path("reference/fixtures/golden.npz")
 DEFAULT_RESOLUTION = 512
-DEFAULT_WARMUP = 3
-DEFAULT_BENCH = 10
+DEFAULT_WARMUP = 5
+DEFAULT_BENCH = 20
 
 FIDELITY_THRESHOLD = 5e-3
 

@@ -84,6 +84,11 @@ def recommend(result: dict, baseline: dict | None) -> str:
         return "REVERT"
     if latency_improved or memory_improved:
         return "KEEP"
+
+    # Weak KEEP: no single metric clears the threshold, but composite score improved
+    score = compute_score(result, baseline)
+    if score > 1.0:
+        return "WEAK_KEEP"
     return "INCONCLUSIVE"
 
 
