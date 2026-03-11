@@ -277,11 +277,13 @@ class MaskUnitAttention(nn.Module):
 
         if num_windows == 1 and self._use_sdpa:
             # Fast path for global attention (stages 2-3, 19 of 24 blocks).
-            # Skip window dimension entirely — eliminates 4 transposes per block.
-            # [B, N, 3*dim_out] -> [B, N, 3, heads, head_dim] -> [3, B, heads, N, head_dim]
-            qkv = qkv.reshape(batch_size, num_tokens, 3, self.heads, self.head_dim)
-            qkv = mx.transpose(qkv, axes=(2, 0, 3, 1, 4))
-            q, k, v = qkv[0], qkv[1], qkv[2]  # each [B, heads, N, head_dim]
+            # Split QKV along last (contiguous) dim first, then do smaller 4D
+            # transposes per tensor. Avoids large 5D transpose + 3 non-contiguous
+            # slices that force implicit memory copies before SDPA.
+            q, k, v = mx.split(qkv, 3, axis=-1)  # each [B, N, dim_out]
+            q = mx.transpose(q.reshape(batch_size, num_tokens, self.heads, self.head_dim), axes=(0, 2, 1, 3))
+            k = mx.transpose(k.reshape(batch_size, num_tokens, self.heads, self.head_dim), axes=(0, 2, 1, 3))
+            v = mx.transpose(v.reshape(batch_size, num_tokens, self.heads, self.head_dim), axes=(0, 2, 1, 3))
 
             if self.q_stride > 1:
                 q = q.reshape(batch_size, self.heads, self.q_stride, -1, self.head_dim)
