@@ -13,6 +13,10 @@ Researched 2026-03-11. MLX v0.31.0 on Darwin 25.3.0 (M3 Max).
 - Backbone has 144 Linear layers (6/block x 24 blocks) -- these dominate compute
 - Decoder has 4 Linear projections -- also quantizable
 - Refiner is all Conv2d -- unaffected
+- **CRITICAL**: default group_size=64 CRASHES on Hiera — some Linear layers have
+  input_dims=112 (not divisible by 64). Shape (336,112) causes ValueError.
+  MUST use group_size=16 or manually filter layers by dimension divisibility.
+  Alternatively, write a custom quantize function that skips incompatible layers.
 
 ### mx.set_wired_limit(bytes) -- pin memory
 - Pins Metal allocations as wired/resident, prevents OS paging to swap
