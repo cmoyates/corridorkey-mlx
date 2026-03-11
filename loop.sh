@@ -475,18 +475,18 @@ $(tail -30 "$GATE3_LOG")"
 
   # --- Apply decision ---
   case "$VERDICT" in
-    KEEP)
-      echo "[KEEP] score=$SCORE — committing changes"
+    KEEP|WEAK_KEEP)
+      echo "[$VERDICT] score=$SCORE — committing changes"
       # Commit BEFORE cleanup (preserves new files)
       git -C "$ROOT" add -A
-      git -C "$ROOT" commit -m "exp: $EXP_NAME [score=$SCORE, verdict=KEEP]" -q
+      git -C "$ROOT" commit -m "exp: $EXP_NAME [score=$SCORE, verdict=$VERDICT]" -q
       # Log to experiment history
       uv run python "$ROOT/scripts/summarize_experiment.py" \
         --result "$RESULT_FILE" --verdict KEEP --notes "loop iteration $i"
       STALLS=0
       STALL_TYPE=""
       LAST_ERROR=""
-      log_iteration "$i" "KEEP" "score=$SCORE" "$EXP_NAME"
+      log_iteration "$i" "$VERDICT" "score=$SCORE" "$EXP_NAME"
       ;;
     REVERT)
       echo "[REVERT] score=$SCORE — reverting changes"

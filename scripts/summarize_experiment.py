@@ -32,7 +32,7 @@ SEARCH_AREAS = [
 def main() -> None:
     parser = argparse.ArgumentParser(description="Summarize experiment")
     parser.add_argument("--result", type=Path, required=True)
-    parser.add_argument("--verdict", choices=["KEEP", "REVERT", "INCONCLUSIVE"], default=None)
+    parser.add_argument("--verdict", choices=["KEEP", "WEAK_KEEP", "REVERT", "INCONCLUSIVE"], default=None)
     parser.add_argument("--notes", type=str, default="")
     args = parser.parse_args()
 

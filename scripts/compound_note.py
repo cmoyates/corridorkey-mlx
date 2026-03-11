@@ -26,7 +26,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Generate compound note")
     parser.add_argument("--result", type=Path, required=False, default=None)
     parser.add_argument("--decision", type=Path, required=False, default=None)
-    parser.add_argument("--verdict", required=True, choices=["KEEP", "REVERT", "INCONCLUSIVE", "ERROR"])
+    parser.add_argument("--verdict", required=True, choices=["KEEP", "WEAK_KEEP", "REVERT", "INCONCLUSIVE", "ERROR"])
     parser.add_argument("--score", type=float, default=None)
     parser.add_argument("--notes", type=str, default="")
     parser.add_argument("--error-log", type=Path, default=None, help="Path to error log for runtime failures")
@@ -73,7 +73,7 @@ def main() -> None:
         failure_reason = "Performance regression"
     elif args.verdict == "INCONCLUSIVE":
         failure_reason = "Within measurement noise"
-    else:
+    elif args.verdict in ("KEEP", "WEAK_KEEP"):
         failure_reason = None
 
     # Count existing notes for numbering
