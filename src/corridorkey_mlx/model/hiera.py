@@ -273,50 +273,63 @@ class MaskUnitAttention(nn.Module):
             (num_tokens // (self.q_stride * self.window_size)) if self.use_mask_unit_attn else 1
         )
 
-        # QKV projection + reshape to [B, N/num_windows, num_windows, 3, heads, head_dim]
         qkv = self.qkv(x)
-        qkv = qkv.reshape(batch_size, -1, num_windows, 3, self.heads, self.head_dim)
-        # Permute to [3, B, heads, num_windows, tokens_per_window, head_dim]
-        qkv = mx.transpose(qkv, axes=(3, 0, 4, 2, 1, 5))
-        q, k, v = qkv[0], qkv[1], qkv[2]
 
-        if self.q_stride > 1:
-            # Max-pool over q_stride tokens in the query
-            # [B, heads, num_windows, q_stride, tokens/q_stride, head_dim]
-            q = q.reshape(batch_size, self.heads, num_windows, self.q_stride, -1, self.head_dim)
-            q = mx.max(q, axis=3)
+        if num_windows == 1 and self._use_sdpa:
+            # Fast path for global attention (stages 2-3, 19 of 24 blocks).
+            # Skip window dimension entirely — eliminates 4 transposes per block.
+            # [B, N, 3*dim_out] -> [B, N, 3, heads, head_dim] -> [3, B, heads, N, head_dim]
+            qkv = qkv.reshape(batch_size, num_tokens, 3, self.heads, self.head_dim)
+            qkv = mx.transpose(qkv, axes=(2, 0, 3, 1, 4))
+            q, k, v = qkv[0], qkv[1], qkv[2]  # each [B, heads, N, head_dim]
 
-        if self._use_sdpa:
-            # Fold window dim into batch for SDPA (expects 4D).
-            # Q/K/V are (B, heads, windows, tokens, head_dim) — transpose windows
-            # next to batch before reshape so (B, W, H, T, D) -> (B*W, H, T, D).
-            q_tokens = q.shape[3]
-            kv_tokens = k.shape[3]
-            q_4d = mx.transpose(q, axes=(0, 2, 1, 3, 4)).reshape(
-                batch_size * num_windows, self.heads, q_tokens, self.head_dim
-            )
-            k_4d = mx.transpose(k, axes=(0, 2, 1, 3, 4)).reshape(
-                batch_size * num_windows, self.heads, kv_tokens, self.head_dim
-            )
-            v_4d = mx.transpose(v, axes=(0, 2, 1, 3, 4)).reshape(
-                batch_size * num_windows, self.heads, kv_tokens, self.head_dim
-            )
+            if self.q_stride > 1:
+                q = q.reshape(batch_size, self.heads, self.q_stride, -1, self.head_dim)
+                q = mx.max(q, axis=2)
 
-            x = mx.fast.scaled_dot_product_attention(q_4d, k_4d, v_4d, scale=self.scale)
+            x = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.scale)
 
-            # Unfold: (B*W, H, T, D) -> (B, W, H, T, D) -> (B, H, W, T, D)
-            x = x.reshape(batch_size, num_windows, self.heads, q_tokens, self.head_dim)
-            x = mx.transpose(x, axes=(0, 2, 1, 3, 4))
+            # [B, heads, N', head_dim] -> [B, N', heads, head_dim] -> [B, N', dim_out]
+            x = mx.transpose(x, axes=(0, 2, 1, 3))
+            x = x.reshape(batch_size, -1, self.dim_out)
         else:
-            # Manual scaled dot-product attention (original implementation)
-            attn = (q * self.scale) @ mx.transpose(k, axes=(0, 1, 2, 4, 3))
-            attn = mx.softmax(attn, axis=-1)
-            x = attn @ v
+            # Windowed path for mask-unit attention (stages 0-1, 5 blocks).
+            # [B, N/win, win, 3, heads, head_dim] -> [3, B, heads, win, tokens, head_dim]
+            qkv = qkv.reshape(batch_size, -1, num_windows, 3, self.heads, self.head_dim)
+            qkv = mx.transpose(qkv, axes=(3, 0, 4, 2, 1, 5))
+            q, k, v = qkv[0], qkv[1], qkv[2]
 
-        # [B, heads, num_windows, tokens, head_dim] -> [B, tokens, num_windows, heads, head_dim]
-        # -> [B, N', dim_out]  (matches PyTorch transpose(1, 3))
-        x = mx.transpose(x, axes=(0, 3, 2, 1, 4))
-        x = x.reshape(batch_size, -1, self.dim_out)
+            if self.q_stride > 1:
+                q = q.reshape(
+                    batch_size, self.heads, num_windows, self.q_stride, -1, self.head_dim
+                )
+                q = mx.max(q, axis=3)
+
+            if self._use_sdpa:
+                q_tokens = q.shape[3]
+                kv_tokens = k.shape[3]
+                q_4d = mx.transpose(q, axes=(0, 2, 1, 3, 4)).reshape(
+                    batch_size * num_windows, self.heads, q_tokens, self.head_dim
+                )
+                k_4d = mx.transpose(k, axes=(0, 2, 1, 3, 4)).reshape(
+                    batch_size * num_windows, self.heads, kv_tokens, self.head_dim
+                )
+                v_4d = mx.transpose(v, axes=(0, 2, 1, 3, 4)).reshape(
+                    batch_size * num_windows, self.heads, kv_tokens, self.head_dim
+                )
+
+                x = mx.fast.scaled_dot_product_attention(q_4d, k_4d, v_4d, scale=self.scale)
+
+                x = x.reshape(batch_size, num_windows, self.heads, q_tokens, self.head_dim)
+                x = mx.transpose(x, axes=(0, 2, 1, 3, 4))
+            else:
+                attn = (q * self.scale) @ mx.transpose(k, axes=(0, 1, 2, 4, 3))
+                attn = mx.softmax(attn, axis=-1)
+                x = attn @ v
+
+            # [B, heads, win, tokens, head_dim] -> [B, tokens, win, heads, head_dim]
+            x = mx.transpose(x, axes=(0, 3, 2, 1, 4))
+            x = x.reshape(batch_size, -1, self.dim_out)
 
         return self.proj(x)
 
