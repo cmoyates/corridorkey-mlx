@@ -26,6 +26,7 @@ CLAUDE_TIMEOUT="${CLAUDE_TIMEOUT:-600}"
 
 STALLS=0
 STALL_TYPE=""
+LAST_ERROR=""
 
 ARTIFACTS_DIR="$ROOT/artifacts"
 RUNS_DIR="$ARTIFACTS_DIR/runs"
@@ -132,7 +133,18 @@ fi
 # Dynamic prompt construction
 # ---------------------------------------------------------------------------
 build_prompt() {
-  local last_experiments best_result compound_index
+  local last_experiments best_result compound_index last_error_block
+
+  # Error context from previous iteration
+  if [[ -n "$LAST_ERROR" ]]; then
+    last_error_block="THE PREVIOUS ITERATION FAILED. You MUST read this error and avoid repeating it:
+\`\`\`
+$LAST_ERROR
+\`\`\`
+Adapt your approach based on this error. Do NOT retry the exact same experiment."
+  else
+    last_error_block="(none)"
+  fi
 
   # Last 5 experiments from log
   last_experiments="$(tail -5 "$ROOT/research/experiments.jsonl" 2>/dev/null || echo "(no experiments yet)")"
@@ -214,6 +226,9 @@ $compound_notes
 10. refiner-only-tiling — backbone+decoder once at full res, tile only CNN refiner
 11. fused-metal-kernels — mx.fast.metal_kernel() for conv+GN+GELU in refiner blocks
 
+## Previous iteration error (if any)
+$last_error_block
+
 ## Rules
 - Modify ONLY files in: src/corridorkey_mlx/, scripts/infer.py, scripts/smoke_engine.py
 - Do NOT modify: scripts/bench_*, scripts/compare_*, scripts/score_*,
@@ -278,8 +293,11 @@ for ((i=1; i<=ITERATIONS; i++)); do
 
   # --- Gate 1: Validate decision schema ---
   echo "[gate] Validating decision.json..."
-  if ! uv run python "$ROOT/scripts/validate_decision.py" --decision "$DECISION_PATH"; then
+  GATE1_ERR=""
+  if ! GATE1_ERR="$(uv run python "$ROOT/scripts/validate_decision.py" --decision "$DECISION_PATH" 2>&1)"; then
+    echo "$GATE1_ERR"
     echo "[FAIL] Invalid or missing decision.json. Reverting."
+    LAST_ERROR="decision.json validation: $GATE1_ERR"
     revert_changes
     STALLS=$((STALLS + 1)); STALL_TYPE="invalid_output"
     log_iteration "$i" "REVERT" "invalid_decision" ""
@@ -296,8 +314,11 @@ for ((i=1; i<=ITERATIONS; i++)); do
 
   # --- Gate 2: Protected surface check ---
   echo "[gate] Checking protected surfaces..."
-  if ! uv run python "$ROOT/scripts/check_protected_surfaces.py"; then
+  GATE2_ERR=""
+  if ! GATE2_ERR="$(uv run python "$ROOT/scripts/check_protected_surfaces.py" 2>&1)"; then
+    echo "$GATE2_ERR"
     echo "[FAIL] Protected surface modified! Reverting."
+    LAST_ERROR="protected surface violation: $GATE2_ERR"
     revert_changes
     STALLS=$((STALLS + 1)); STALL_TYPE="protected_surface"
     log_iteration "$i" "REVERT" "protected_surface_violation" "$EXP_NAME"
@@ -311,12 +332,20 @@ for ((i=1; i<=ITERATIONS; i++)); do
 
   # --- Gate 3: Fidelity + benchmark ---
   RESULT_FILE="$RUNS_DIR/result-$i.json"
+  GATE3_LOG="$RUNS_DIR/gate3-$i.log"
   echo "[gate] Running fidelity + benchmark..."
-  if ! uv run python "$ROOT/scripts/run_research_experiment.py" \
+  set +o pipefail
+  uv run python "$ROOT/scripts/run_research_experiment.py" \
     --experiment-name "$EXP_NAME" \
-    --output "$RESULT_FILE"; then
+    --output "$RESULT_FILE" 2>&1 | tee "$GATE3_LOG"
+  GATE3_EXIT="${PIPESTATUS[0]}"
+  set -o pipefail
+  if [[ "$GATE3_EXIT" -ne 0 ]]; then
     echo ""
     echo "FIDELITY FAILED — candidate must be reverted"
+    # Capture last 30 lines of error output for next iteration
+    LAST_ERROR="experiment '$EXP_NAME' failed (fidelity/runtime error):
+$(tail -30 "$GATE3_LOG")"
     # Archive decision before revert destroys it
     cp "$DECISION_PATH" "$RUNS_DIR/decision-$i.json" 2>/dev/null || true
     # Log fidelity failure to experiment history (result file exists even on failure)
@@ -325,12 +354,16 @@ for ((i=1; i<=ITERATIONS; i++)); do
         --result "$RESULT_FILE" --verdict REVERT --notes "fidelity failure, loop iteration $i"
     fi
     revert_changes
-    # Compound: capture learning from fidelity failure
-    if [[ -f "$RESULT_FILE" ]] && [[ -f "$RUNS_DIR/decision-$i.json" ]]; then
-      uv run python "$ROOT/scripts/compound_note.py" \
-        --result "$RESULT_FILE" --decision "$RUNS_DIR/decision-$i.json" \
-        --verdict REVERT --notes "fidelity failure, loop iteration $i"
+    # Compound: capture learning from failure (fidelity or runtime error)
+    if [[ -f "$RESULT_FILE" ]]; then
+      COMPOUND_VERDICT="REVERT"
+    else
+      COMPOUND_VERDICT="ERROR"
     fi
+    COMPOUND_ARGS=(--verdict "$COMPOUND_VERDICT" --error-log "$GATE3_LOG" --experiment-name "$EXP_NAME" --notes "loop iteration $i")
+    [[ -f "$RESULT_FILE" ]] && COMPOUND_ARGS+=(--result "$RESULT_FILE")
+    [[ -f "$RUNS_DIR/decision-$i.json" ]] && COMPOUND_ARGS+=(--decision "$RUNS_DIR/decision-$i.json")
+    uv run python "$ROOT/scripts/compound_note.py" "${COMPOUND_ARGS[@]}" || true
     STALLS=$((STALLS + 1)); STALL_TYPE="fidelity"
     log_iteration "$i" "REVERT" "fidelity_failure" "$EXP_NAME"
     iter_cleanup
@@ -346,6 +379,7 @@ for ((i=1; i<=ITERATIONS; i++)); do
   SCORE_OUTPUT="$(uv run python "$ROOT/scripts/score_experiment.py" \
     --result "$RESULT_FILE" 2>&1)" || {
     echo "[FAIL] Scoring failed. Reverting."
+    LAST_ERROR="scoring failed for '$EXP_NAME': $SCORE_OUTPUT"
     revert_changes
     STALLS=$((STALLS + 1)); STALL_TYPE="scoring_error"
     log_iteration "$i" "REVERT" "scoring_error" "$EXP_NAME"
@@ -377,6 +411,7 @@ for ((i=1; i<=ITERATIONS; i++)); do
         --result "$RESULT_FILE" --verdict KEEP --notes "loop iteration $i"
       STALLS=0
       STALL_TYPE=""
+      LAST_ERROR=""
       log_iteration "$i" "KEEP" "score=$SCORE" "$EXP_NAME"
       ;;
     REVERT)
@@ -385,6 +420,7 @@ for ((i=1; i<=ITERATIONS; i++)); do
       uv run python "$ROOT/scripts/summarize_experiment.py" \
         --result "$RESULT_FILE" --verdict REVERT --notes "loop iteration $i"
       revert_changes
+      LAST_ERROR="experiment '$EXP_NAME' reverted (score=$SCORE, performance regression)"
       STALLS=$((STALLS + 1)); STALL_TYPE="performance"
       log_iteration "$i" "REVERT" "performance_regression score=$SCORE" "$EXP_NAME"
       ;;
@@ -393,6 +429,7 @@ for ((i=1; i<=ITERATIONS; i++)); do
       uv run python "$ROOT/scripts/summarize_experiment.py" \
         --result "$RESULT_FILE" --verdict INCONCLUSIVE --notes "loop iteration $i"
       revert_changes
+      LAST_ERROR="experiment '$EXP_NAME' inconclusive (score=$SCORE, within noise). Try a different approach."
       STALLS=$((STALLS + 1)); STALL_TYPE="inconclusive"
       log_iteration "$i" "INCONCLUSIVE" "within_noise score=$SCORE" "$EXP_NAME"
       ;;

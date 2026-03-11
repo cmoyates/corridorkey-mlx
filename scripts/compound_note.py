@@ -24,26 +24,33 @@ COMPOUND_DIR = Path("research/compound")
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate compound note")
-    parser.add_argument("--result", type=Path, required=True)
-    parser.add_argument("--decision", type=Path, required=True)
-    parser.add_argument("--verdict", required=True, choices=["KEEP", "REVERT", "INCONCLUSIVE"])
+    parser.add_argument("--result", type=Path, required=False, default=None)
+    parser.add_argument("--decision", type=Path, required=False, default=None)
+    parser.add_argument("--verdict", required=True, choices=["KEEP", "REVERT", "INCONCLUSIVE", "ERROR"])
     parser.add_argument("--score", type=float, default=None)
     parser.add_argument("--notes", type=str, default="")
+    parser.add_argument("--error-log", type=Path, default=None, help="Path to error log for runtime failures")
+    parser.add_argument("--experiment-name", type=str, default=None, help="Experiment name (when decision.json unavailable)")
+    parser.add_argument("--search-area", type=str, default=None, help="Search area (when decision.json unavailable)")
     args = parser.parse_args()
 
-    if not args.result.exists():
-        print(f"Result not found: {args.result}", file=sys.stderr)
-        sys.exit(1)
-    if not args.decision.exists():
-        print(f"Decision not found: {args.decision}", file=sys.stderr)
-        sys.exit(1)
+    # Load result and decision if available
+    result = {}
+    decision = {}
+    error_text = ""
 
-    result = json.loads(args.result.read_text())
-    decision = json.loads(args.decision.read_text())
+    if args.result and args.result.exists():
+        result = json.loads(args.result.read_text())
+    if args.decision and args.decision.exists():
+        decision = json.loads(args.decision.read_text())
+    if args.error_log and args.error_log.exists():
+        full_log = args.error_log.read_text()
+        # Keep last 40 lines to stay concise
+        error_text = "\n".join(full_log.strip().splitlines()[-40:])
 
-    name = decision.get("experiment_name", "unknown")
+    name = args.experiment_name or decision.get("experiment_name", "unknown")
     hypothesis = decision.get("hypothesis", "(no hypothesis)")
-    search_area = decision.get("search_area", "unknown")
+    search_area = args.search_area or decision.get("search_area", "unknown")
     files_changed = decision.get("files_changed", [])
 
     fidelity_passed = result.get("fidelity_passed", False)
@@ -55,7 +62,9 @@ def main() -> None:
     max_abs_errors = parity.get("max_abs_errors", {})
 
     # Determine failure reason
-    if not fidelity_passed:
+    if args.verdict == "ERROR":
+        failure_reason = "Runtime error — experiment crashed before producing results"
+    elif not fidelity_passed and result:
         failure_reason = "Fidelity gate failed"
         if max_abs_errors:
             worst_key = max(max_abs_errors, key=max_abs_errors.get)
@@ -130,6 +139,21 @@ def main() -> None:
             "## Why it failed",
             "",
             failure_reason,
+        ])
+
+    if error_text:
+        lines.extend([
+            "",
+            "## Error log",
+            "",
+            "```",
+            error_text,
+            "```",
+            "",
+            "### Takeaway",
+            "",
+            "This runtime error must be addressed before retrying this approach.",
+            "The proposer should read this traceback and fix the root cause.",
         ])
 
     if args.notes:
