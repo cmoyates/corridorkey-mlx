@@ -165,6 +165,37 @@ for n in sorted(names): print(f'  - {n}')
   # Current best result
   best_result="$(cat "$ROOT/research/best_result.json" 2>/dev/null || echo "(no best result yet)")"
 
+  # Steering: compute which priority tier to target this iteration
+  local steering_directive
+  steering_directive="$(python3 -c "
+import json, sys
+TOP_AREAS = ['selective-precision', 'tensor-layout-staging', 'refiner-dilated-conv-fix']
+MED_AREAS = ['token-routing', 'stream-pipelining', 'fused-metal-kernels', 'matmul-ordering', 'addmm-fusion', 'dtype-cast-cleanup']
+tried = set()
+area_attempts = {}
+try:
+    for line in open('$ROOT/research/experiments.jsonl'):
+        line = line.strip()
+        if not line: continue
+        e = json.loads(line)
+        sa = e.get('search_area', '')
+        if sa: area_attempts[sa] = area_attempts.get(sa, 0) + 1
+except: pass
+
+# Find top-priority areas with < 2 attempts
+untried_top = [a for a in TOP_AREAS if area_attempts.get(a, 0) < 2]
+untried_med = [a for a in MED_AREAS if area_attempts.get(a, 0) < 2]
+
+if untried_top:
+    target = untried_top[0]
+    print(f'MANDATORY: You MUST target search area \"{target}\" this iteration. This is a TOP PRIORITY area that has not been adequately explored. Do NOT choose a different area.')
+elif untried_med:
+    target = untried_med[0]
+    print(f'STRONGLY RECOMMENDED: Target search area \"{target}\" — all top-priority areas have been explored.')
+else:
+    print('All priority areas explored. Choose any allowed area with a novel approach.')
+" 2>/dev/null || echo "")"
+
   # Compound notes — build compact index (title + verdict per file)
   local compound_index=""
   if ls "$ROOT/research/compound/"*.md 1>/dev/null 2>&1; then
@@ -186,6 +217,9 @@ for n in sorted(names): print(f'  - {n}')
 You are a stateless MLX optimization engineer. You will propose exactly one
 bounded code mutation for corridorkey-mlx. You do NOT run benchmarks — the
 orchestrator does that after you exit.
+
+## STEERING DIRECTIVE (from orchestrator)
+$steering_directive
 
 CRITICAL REQUIREMENT: You MUST use the Write tool to create the file
 artifacts/latest_decision.json before you finish. The loop WILL FAIL if this
@@ -425,7 +459,7 @@ $(tail -30 "$GATE3_LOG")"
     # Log fidelity failure to experiment history (result file exists even on failure)
     if [[ -f "$RESULT_FILE" ]]; then
       uv run python "$ROOT/scripts/summarize_experiment.py" \
-        --result "$RESULT_FILE" --verdict REVERT --notes "fidelity failure, loop iteration $i"
+        --result "$RESULT_FILE" --decision "$DECISION_PATH" --verdict REVERT --notes "fidelity failure, loop iteration $i"
     fi
     revert_changes
     # Compound: capture learning from failure (fidelity or runtime error)
@@ -482,7 +516,7 @@ $(tail -30 "$GATE3_LOG")"
       git -C "$ROOT" commit -m "exp: $EXP_NAME [score=$SCORE, verdict=$VERDICT]" -q
       # Log to experiment history
       uv run python "$ROOT/scripts/summarize_experiment.py" \
-        --result "$RESULT_FILE" --verdict KEEP --notes "loop iteration $i"
+        --result "$RESULT_FILE" --decision "$DECISION_PATH" --verdict KEEP --notes "loop iteration $i"
       STALLS=0
       STALL_TYPE=""
       LAST_ERROR=""
@@ -492,7 +526,7 @@ $(tail -30 "$GATE3_LOG")"
       echo "[REVERT] score=$SCORE — reverting changes"
       # Log BEFORE revert (result file is in artifacts/runs/, survives clean)
       uv run python "$ROOT/scripts/summarize_experiment.py" \
-        --result "$RESULT_FILE" --verdict REVERT --notes "loop iteration $i"
+        --result "$RESULT_FILE" --decision "$DECISION_PATH" --verdict REVERT --notes "loop iteration $i"
       revert_changes
       LAST_ERROR="experiment '$EXP_NAME' reverted (score=$SCORE, performance regression)"
       STALLS=$((STALLS + 1)); STALL_TYPE="performance"
@@ -501,7 +535,7 @@ $(tail -30 "$GATE3_LOG")"
     *)
       echo "[INCONCLUSIVE] score=$SCORE — reverting (within noise)"
       uv run python "$ROOT/scripts/summarize_experiment.py" \
-        --result "$RESULT_FILE" --verdict INCONCLUSIVE --notes "loop iteration $i"
+        --result "$RESULT_FILE" --decision "$DECISION_PATH" --verdict INCONCLUSIVE --notes "loop iteration $i"
       revert_changes
       LAST_ERROR="experiment '$EXP_NAME' inconclusive (score=$SCORE, within noise). Try a different approach."
       STALLS=$((STALLS + 1)); STALL_TYPE="inconclusive"

@@ -32,6 +32,7 @@ SEARCH_AREAS = [
 def main() -> None:
     parser = argparse.ArgumentParser(description="Summarize experiment")
     parser.add_argument("--result", type=Path, required=True)
+    parser.add_argument("--decision", type=Path, default=None, help="Decision JSON (for search_area extraction)")
     parser.add_argument("--verdict", choices=["KEEP", "WEAK_KEEP", "REVERT", "INCONCLUSIVE"], default=None)
     parser.add_argument("--notes", type=str, default="")
     args = parser.parse_args()
@@ -44,6 +45,12 @@ def main() -> None:
     name = result.get("experiment_name", "unknown")
     timestamp = result.get("timestamp", "")
 
+    # Extract search_area from decision.json if available
+    search_area = ""
+    if args.decision and args.decision.exists():
+        decision = json.loads(args.decision.read_text())
+        search_area = decision.get("search_area", "")
+
     verdict = args.verdict
     if verdict is None:
         verdict = "KEEP" if result.get("fidelity_passed", False) else "REVERT"
@@ -53,6 +60,7 @@ def main() -> None:
         "experiment_name": name,
         "timestamp": timestamp,
         "resolution": result.get("resolution"),
+        "search_area": search_area,
         "verdict": verdict,
         "fidelity_passed": result.get("fidelity_passed"),
         "median_ms": result.get("benchmark", {}).get("median_ms"),
@@ -68,7 +76,7 @@ def main() -> None:
         f.write(json.dumps(entry) + "\n")
 
     # If KEEP and better than current best, update best
-    if verdict == "KEEP":
+    if verdict in ("KEEP", "WEAK_KEEP"):
         if BEST_RESULT_PATH.exists():
             best = json.loads(BEST_RESULT_PATH.read_text())
             best_median = best.get("benchmark", {}).get("median_ms", float("inf"))
