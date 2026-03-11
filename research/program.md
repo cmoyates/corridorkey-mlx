@@ -66,11 +66,12 @@ Reduce steady-state inference latency and peak memory usage on Apple Silicon whi
 - Clean standalone impl in CorridorKey-Engine `TiledCNNRefiner`
 - Most impactful at resolutions > 512
 
-### 11. Custom fused Metal kernels for refiner
-- `mx.fast.metal_kernel()` — JIT custom Metal shaders
-- Fuse conv+GroupNorm+GELU per refiner block to reduce memory traffic
-- Dilated convs in refiner disqualified from implicit GEMM (explicit im2col fallback)
-- High effort, high reward for bandwidth-bound refiner
+### 11. Custom fused Metal kernels for refiner — CLOSED (2026-03-11)
+- `mx.fast.metal_kernel()` works and is compatible with `mx.compile()`
+- BUT: custom kernels cannot access AMX matrix hardware, so conv operations are always slower
+- Viable for element-wise / gather ops, NOT for compute-intensive (matmul, conv)
+- Fusing conv+GroupNorm+ReLU won't help since the conv portion is AMX-bound
+- See: research/compound/dilated_conv_kernel_experiment.md
 
 ## Phase 2 experiment queue (priority order)
 
@@ -129,13 +130,14 @@ Reduce steady-state inference latency and peak memory usage on Apple Silicon whi
 - Must run in separate stream via mx.new_stream(mx.gpu)
 - For throughput (video), not single-image latency
 
-### 21. Refiner dilated conv fix (ROOT CAUSE)
-- Dilated convolutions (dilation 1,2,4,8) are EXCLUDED from MLX implicit GEMM (PR #3147)
+### 21. Refiner dilated conv fix — CLOSED (2026-03-11)
+- Dilated convolutions (dilation 2,4,8) are EXCLUDED from MLX implicit GEMM (PR #3147)
 - Forces explicit im2col fallback: inflates activation memory by 9x (kernel_size^2)
-- This is likely THE dominant bottleneck for both latency and memory
-- Option A: Replace with stride-2 downsample + standard conv + bilinear upsample (needs retraining)
-- Option B: Custom Metal kernel via mx.fast.metal_kernel (same math, no im2col)
-- Expected: 15-20% latency + 15-20% peak memory reduction
+- **TESTED AND DISPROVEN**: im2col+GEMM is NOT a bottleneck — it's the fast path
+- Tested: naive Metal kernel (1.87x slower), SIMD Metal kernel (2.8x slower), sub-pixel decomposition (5% latency + 9% memory regression)
+- Root cause: im2col enables AMX matrix hardware acceleration. Bypassing im2col = bypassing AMX.
+- The 9x memory inflation is the unavoidable cost of hardware-optimized GEMM on Apple Silicon
+- See: research/compound/dilated_conv_kernel_experiment.md
 
 ### 22. Edge-aware tile blend weights
 - Only ramp edges that overlap with adjacent tiles, keep full weight at image boundaries
