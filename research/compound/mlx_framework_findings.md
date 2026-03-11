@@ -13,10 +13,14 @@ Researched 2026-03-11. MLX v0.31.0 on Darwin 25.3.0 (M3 Max).
 - Backbone has 144 Linear layers (6/block x 24 blocks) -- these dominate compute
 - Decoder has 4 Linear projections -- also quantizable
 - Refiner is all Conv2d -- unaffected
-- **CRITICAL**: default group_size=64 CRASHES on Hiera — some Linear layers have
-  input_dims=112 (not divisible by 64). Shape (336,112) causes ValueError.
-  MUST use group_size=16 or manually filter layers by dimension divisibility.
-  Alternatively, write a custom quantize function that skips incompatible layers.
+- **BLOCKED**: nn.quantize CANNOT be used on full Hiera backbone.
+  Supported group_sizes: 32, 64, 128 ONLY.
+  Hiera has Linear layers with input_dims=112 — NOT divisible by 32, 64, or 128.
+  group_size=64 crashes on shape (336,112). group_size=16 is unsupported.
+  The ONLY viable approach: write a custom quantize function that SKIPS Linear
+  layers where input_dims % group_size != 0, quantizing only compatible layers.
+  Or quantize only the deeper stages (stages 1-3 have dims 224, 448, 896 — all
+  divisible by 32). Stage 0 (dim=112) must stay fp32.
 
 ### mx.set_wired_limit(bytes) -- pin memory
 - Pins Metal allocations as wired/resident, prevents OS paging to swap

@@ -234,7 +234,7 @@ $compound_index
 3. tiled-inference-heuristics — tile size/overlap sweeps, blending strategies
 4. compile-path-policy — mx.compile for fixed shapes, warmup-aware
 5. tensor-layout-staging — contiguity, minimize NCHW-NHWC transitions
-6. backbone-quantization — nn.quantize(backbone, bits=8), 144 Linear layers dominate compute
+6. backbone-quantization — ONLY stages 1-3 (dims 224,448,896 divisible by 32). Stage 0 (dim=112) must stay fp32. Write custom quantize that skips incompatible layers.
 7. mlx-memory-tuning — mx.set_wired_limit() for p95, mx.set_cache_limit() for peak memory
 8. layernorm-fusion — check if nn.LayerNorm dispatches to mx.fast.layer_norm, swap if not
 9. token-routing — skip attention for easy tokens (alpha hint near 0/1), identity LTRM at stages 2-3
