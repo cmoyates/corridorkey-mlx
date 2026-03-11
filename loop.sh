@@ -207,6 +207,12 @@ $compound_notes
 3. tiled-inference-heuristics — tile size/overlap sweeps, blending strategies
 4. compile-path-policy — mx.compile for fixed shapes, warmup-aware
 5. tensor-layout-staging — contiguity, minimize NCHW-NHWC transitions
+6. backbone-quantization — nn.quantize(backbone, bits=8), 144 Linear layers dominate compute
+7. mlx-memory-tuning — mx.set_wired_limit() for p95, mx.set_cache_limit() for peak memory
+8. layernorm-fusion — check if nn.LayerNorm dispatches to mx.fast.layer_norm, swap if not
+9. token-routing — skip attention for easy tokens (alpha hint near 0/1), identity LTRM at stages 2-3
+10. refiner-only-tiling — backbone+decoder once at full res, tile only CNN refiner
+11. fused-metal-kernels — mx.fast.metal_kernel() for conv+GN+GELU in refiner blocks
 
 ## Rules
 - Modify ONLY files in: src/corridorkey_mlx/, scripts/infer.py, scripts/smoke_engine.py
