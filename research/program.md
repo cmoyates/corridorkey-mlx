@@ -32,6 +32,58 @@ Reduce steady-state inference latency and peak memory usage on Apple Silicon whi
 - Minimize NCHW-NHWC transitions
 - Staging: avoid CPU-GPU roundtrips in tiled inference
 
+## Phase 2 search areas (from upstream research 2026-03-11)
+
+### 6. Backbone quantization (8-bit Linear layers)
+- `nn.quantize(model.backbone, bits=8)` — one-liner
+- 144 Linear layers in Hiera dominate compute
+- Expected: ~50% weight memory reduction + potential speedup on memory-bound matmuls
+- Risk: fidelity gate (must check max_abs vs golden)
+- Source: MLX `nn.quantize()` API, upstream Issue #53 concept
+
+### 7. MLX memory tuning APIs
+- `mx.set_wired_limit(bytes)` — pin model weights in physical RAM, reduce p95 variance
+- `mx.set_cache_limit(bytes)` — tune buffer reuse pool size
+  - Tight limit -> lower peak memory, higher alloc overhead
+  - Loose limit -> faster reuse, higher peak
+- Both zero-risk, macOS 15+ (Darwin 25.3.0 = compatible)
+
+### 8. Verify nn.LayerNorm -> mx.fast.layer_norm dispatch
+- 48 LayerNorm calls in backbone (2 per block x 24 blocks)
+- If `nn.LayerNorm` doesn't dispatch to fused `mx.fast.layer_norm`, manual swap = free speedup
+- Zero fidelity risk (numerically equivalent)
+
+### 9. Token routing — skip attention for easy tokens
+- Route tokens where alpha hint near 0 or 1 to cheap O(N) path instead of O(N^2) attention
+- Applied at Hiera stages 2-3 only
+- Zero-init LTRM module = identity residual, works without fine-tuning
+- Source: 99oblivius/CorridorKey-Engine `HintBasedTokenRouter`
+- Risk: fidelity unknown — need to test identity-residual path quality
+
+### 10. Refiner-only tiling
+- Run backbone+decoder once at full res, tile only the CNN refiner
+- Lower peak memory than full-model tiling (backbone intermediates allocated once)
+- Clean standalone impl in CorridorKey-Engine `TiledCNNRefiner`
+- Most impactful at resolutions > 512
+
+### 11. Custom fused Metal kernels for refiner
+- `mx.fast.metal_kernel()` — JIT custom Metal shaders
+- Fuse conv+GroupNorm+GELU per refiner block to reduce memory traffic
+- Dilated convs in refiner disqualified from implicit GEMM (explicit im2col fallback)
+- High effort, high reward for bandwidth-bound refiner
+
+## Phase 2 experiment queue (priority order)
+
+| Pri | Experiment | Search Area | Effort | Expected Impact |
+|-----|-----------|-------------|--------|-----------------|
+| 1 | `nn.quantize(backbone, bits=8)` | S6 | Low | High — weight mem + matmul speed |
+| 2 | `set_wired_limit()` sweep | S7 | Low | p95 reduction |
+| 3 | `set_cache_limit()` sweep | S7 | Low | Peak memory reduction |
+| 4 | LayerNorm dispatch check + swap | S8 | Low | Free if not already fused |
+| 5 | Token routing (identity LTRM) | S9 | Medium | 50-80% attention FLOP reduction |
+| 6 | Refiner-only tiling | S10 | Medium | Memory at high res |
+| 7 | Fused Metal refiner kernels | S11 | High | Bandwidth reduction |
+
 ## Out of scope (phase 1)
 
 - Architecture redesign

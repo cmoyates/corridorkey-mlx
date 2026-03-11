@@ -181,24 +181,32 @@ CorridorKeyEngine (inference_engine.py)
 
 ---
 
-## Action Items (sorted by expected impact)
+## Action Items (sorted by expected impact, updated 2026-03-11)
 
 | Priority | Item | Source | Effort | Expected Impact |
 |----------|------|--------|--------|-----------------|
-| 1 | MLX quantization (8-bit/4-bit linear layers) | Issue #53 concept | Medium | ~50% checkpoint size reduction, potential speedup on memory-bound ops |
-| 2 | Guided filter alpha post-processing for tiled mode | PR #130 | Low | Better edge quality in tiled inference |
-| 3 | Resolution-scaled matte tightening | PR #130 | Low | Compensate soft edges at small tile sizes |
-| 4 | Original pixel restoration blend | PR #130 | Low | Preserve detail lost in resize round-trip |
-| 5 | Refiner-only tiling (backbone runs once, tile only CNN) | PR #54 | Medium | Less memory overhead than full-model tiling |
-| 6 | Full bf16 model cast (vs selective layer bf16) | PR #104 | Low | Simpler code, ~same memory benefit |
-| 7 | Monitor distilled model checkpoint | PR #109, Issue #107 | None (wait) | Smaller model if released |
+| 1 | Backbone Linear quantization (8-bit) | MLX nn.quantize + Issue #53 | Low | Weight mem + matmul speed (144 Linears) |
+| 2 | mx.set_wired_limit() sweep | MLX API | Low | p95 variance reduction |
+| 3 | mx.set_cache_limit() sweep | MLX API | Low | Peak memory tuning |
+| 4 | nn.LayerNorm -> mx.fast.layer_norm check | MLX API | Low | Free speedup if not already fused |
+| 5 | Token routing (skip attention for easy tokens) | CorridorKey-Engine | Medium | 50-80% attention FLOP reduction |
+| 6 | Refiner-only tiling | PR #54 + Engine impl | Medium | Lower peak mem at high res |
+| 7 | Guided filter alpha post-processing | PR #130 | Low | Tiled edge quality |
+| 8 | Fused Metal refiner kernels | mx.fast.metal_kernel | High | Bandwidth reduction |
+| 9 | Monitor distilled model checkpoint | PR #109, Issue #107 | None (wait) | Smaller model if released |
+
+See also: `compound/mlx_framework_findings.md`, `compound/community_repo_findings.md`
 
 ---
 
 ## Unresolved Questions
 
-- Guided filter on MLX: implement via `mx.conv2d` box filters or keep as numpy post-processing?
-- Tile alignment: upstream uses 224px LCM -- does our Hiera port have same constraint or different?
-- Refiner-only tiling: worth implementing given we already have full-model tiling?
-- Full bf16 cast: quality regression vs selective bf16 on our backbone (Hiera fp32 was intentional for parity)?
-- Distilled model timeline: any indication upstream will release a smaller checkpoint?
+- nn.LayerNorm: already dispatches to mx.fast.layer_norm internally?
+- nn.quantize: can apply to backbone submodule only?
+- 8-bit backbone: how much fidelity budget consumed vs golden.npz?
+- mx.depends: works inside mx.compile-d graphs?
+- Token routing without LTRM fine-tuning: identity residual cause quality regression?
+- What fraction of tokens are "easy" at typical green screen input?
+- Dilated conv implicit GEMM: 2D dispatch conditions same as 3D?
+- Guided filter on MLX: mx.conv2d box filters or numpy post-processing?
+- Tile alignment: upstream 224px LCM -- same constraint in our Hiera port?
