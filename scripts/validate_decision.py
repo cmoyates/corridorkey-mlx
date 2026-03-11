@@ -19,17 +19,26 @@ SCHEMA_PATH = Path("research/decision.schema.json")
 DEFAULT_DECISION_PATH = Path("artifacts/latest_decision.json")
 
 VALID_SEARCH_AREAS = {
-    "tile-lifecycle-memory",
-    "selective-precision",
-    "tiled-inference-heuristics",
-    "compile-path-policy",
-    "tensor-layout-staging",
+    "addmm-fusion",
+    "async-pipeline",
     "backbone-quantization",
-    "mlx-memory-tuning",
-    "layernorm-fusion",
-    "token-routing",
-    "refiner-only-tiling",
+    "compile-path-policy",
+    "dtype-cast-cleanup",
     "fused-metal-kernels",
+    "graph-materialization",
+    "layernorm-fusion",
+    "matmul-ordering",
+    "mlx-memory-tuning",
+    "refiner-dilated-conv-fix",
+    "refiner-only-tiling",
+    "sdpa-attention",
+    "selective-precision",
+    "stream-pipelining",
+    "tensor-layout-staging",
+    "tile-lifecycle-memory",
+    "tiled-inference-heuristics",
+    "token-routing",
+    "weight-format",
 }
 
 REQUIRED_FIELDS = {"experiment_name", "hypothesis", "files_changed", "search_area"}
