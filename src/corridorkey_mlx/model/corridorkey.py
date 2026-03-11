@@ -44,6 +44,7 @@ class GreenFormer(nn.Module):
         compile_refiner: bool = True,
         compile_decoders: bool = True,
         compile_backbone: bool = True,
+        compile_forward: bool = True,
     ) -> None:
         super().__init__()
         self._compute_dtype = dtype
@@ -55,6 +56,7 @@ class GreenFormer(nn.Module):
         self._compile_refiner = compile_refiner
         self._compile_decoders = compile_decoders
         self._compile_backbone = compile_backbone
+        self._compile_forward = compile_forward
         self.backbone = HieraBackbone(img_size=img_size, use_sdpa=use_sdpa)
         self.alpha_decoder = DecoderHead(BACKBONE_CHANNELS, EMBED_DIM, output_dim=1)
         self.fg_decoder = DecoderHead(BACKBONE_CHANNELS, EMBED_DIM, output_dim=3)
@@ -207,23 +209,24 @@ class GreenFormer(nn.Module):
         # materialize all parameters — mx.eval is MLX array materialization
         mx.eval(self.parameters())  # noqa: S307
 
-        # Compile backbone after weights are materialized — at fixed img_size
-        # all shapes are deterministic (unroll/reroll use precomputed schedules),
-        # so mx.compile can fuse the 24-block transformer into fewer Metal dispatches.
-        if self._compile_backbone:
-            self._compiled_backbone_call = mx.compile(self.backbone.__call__)
+        if self._compile_forward:
+            # Whole-forward compilation: fuses backbone + decoders + upsample +
+            # sigmoid + refiner + final sigmoid into a single compiled graph.
+            # Eliminates eager Metal dispatches between components and the
+            # stage_gc sync point.
+            self._compiled = True
+            self.__call__ = mx.compile(self.__call__)  # type: ignore[method-assign]
+        else:
+            # Per-component compilation (legacy path)
+            if self._compile_backbone:
+                self._compiled_backbone_call = mx.compile(self.backbone.__call__)
 
-        # Compile refiner after weights are materialized — CNN has no
-        # shape-dependent logic so fixed-shape compile is safe and fuses
-        # Metal kernels at full resolution where bandwidth matters most.
-        if self._compile_refiner:
-            self._compiled_refiner_call = mx.compile(self.refiner.__call__)
+            if self._compile_refiner:
+                self._compiled_refiner_call = mx.compile(self.refiner.__call__)
 
-        # Compile decoder heads — fixed shapes at a given resolution,
-        # fuses linear projections + upsample + conv fusion into fewer Metal dispatches.
-        if self._compile_decoders:
-            if self._fused_decode:
-                self._compiled_fused_pair_call = mx.compile(self._fused_pair.__call__)
-            else:
-                self._compiled_alpha_decoder_call = mx.compile(self.alpha_decoder.__call__)
-                self._compiled_fg_decoder_call = mx.compile(self.fg_decoder.__call__)
+            if self._compile_decoders:
+                if self._fused_decode:
+                    self._compiled_fused_pair_call = mx.compile(self._fused_pair.__call__)
+                else:
+                    self._compiled_alpha_decoder_call = mx.compile(self.alpha_decoder.__call__)
+                    self._compiled_fg_decoder_call = mx.compile(self.fg_decoder.__call__)
