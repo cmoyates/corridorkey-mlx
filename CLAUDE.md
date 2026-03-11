@@ -91,6 +91,10 @@ uv run ty check              # type check
 5. Decide: keep / revert based on scoring output
 6. Record: append to `research/experiments.jsonl` + write compound note
 
+### Quantization
+- NEVER use `nn.quantize(block, ...)` directly — Hiera stage 0 has dim=112, not divisible by 32, and will crash
+- ALWAYS use `from corridorkey_mlx.utils.quantize import safe_quantize` — it skips incompatible layers automatically
+
 ### Scope discipline
 - Do not widen scope casually
 - One optimization variable per experiment
