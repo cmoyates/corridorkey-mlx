@@ -136,12 +136,17 @@ def main() -> None:
     print(f"Fidelity:   PASS")
     print(f"Score:      {score}")
 
+    cand_ms = result['benchmark']['median_ms']
+    cand_fps = round(1000.0 / cand_ms, 2) if cand_ms > 0 else 0.0
+
     if baseline:
         base_score = compute_score(baseline, baseline)
+        base_ms = baseline['benchmark']['median_ms']
+        base_fps = round(1000.0 / base_ms, 2) if base_ms > 0 else 0.0
         print(f"Baseline:   {base_score}")
         print(
-            f"Latency:    {result['benchmark']['median_ms']}ms "
-            f"(baseline: {baseline['benchmark']['median_ms']}ms)"
+            f"Latency:    {cand_ms}ms / {cand_fps} FPS "
+            f"(baseline: {base_ms}ms / {base_fps} FPS)"
         )
         print(
             f"Memory:     {result['peak_memory_mb']}MB "
@@ -149,7 +154,7 @@ def main() -> None:
         )
     else:
         print("Baseline:   none (this becomes baseline)")
-        print(f"Latency:    {result['benchmark']['median_ms']}ms")
+        print(f"Latency:    {cand_ms}ms / {cand_fps} FPS")
         print(f"Memory:     {result['peak_memory_mb']}MB")
 
     print(f"\nVERDICT: {verdict}")

@@ -99,7 +99,9 @@ def main() -> None:
     print(f"Name:     {name}")
     print(f"Verdict:  {verdict}")
     print(f"Fidelity: {'PASS' if result.get('fidelity_passed') else 'FAIL'}")
-    print(f"Latency:  {result.get('benchmark', {}).get('median_ms')}ms median")
+    med_ms = result.get('benchmark', {}).get('median_ms')
+    med_fps = round(1000.0 / med_ms, 2) if med_ms and med_ms > 0 else 0.0
+    print(f"Latency:  {med_ms}ms median / {med_fps} FPS")
     print(f"Memory:   {result.get('peak_memory_mb')}MB peak")
     if args.notes:
         print(f"Notes:    {args.notes}")

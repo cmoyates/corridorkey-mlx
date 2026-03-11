@@ -151,9 +151,12 @@ def run_benchmark(
     p95_ms = times[p95_idx]
     min_ms = times[0]
 
+    median_fps = round(1000.0 / median_ms, 2) if median_ms > 0 else 0.0
+
     return {
         "warmup_ms": round(warmup_ms, 2),
         "median_ms": round(median_ms, 2),
+        "median_fps": median_fps,
         "p95_ms": round(p95_ms, 2),
         "min_ms": round(min_ms, 2),
         "all_times_ms": [round(t, 2) for t in times],
@@ -227,7 +230,7 @@ def main() -> None:
     # Benchmark
     print("Running benchmark...")
     bench = run_benchmark(model, args.resolution, args.warmup_runs, args.bench_runs)
-    print(f"  Median: {bench['median_ms']}ms, P95: {bench['p95_ms']}ms")
+    print(f"  Median: {bench['median_ms']}ms ({bench['median_fps']} FPS), P95: {bench['p95_ms']}ms")
 
     # Peak memory (fresh instance)
     print("Measuring peak memory...")

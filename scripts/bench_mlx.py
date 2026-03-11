@@ -168,6 +168,8 @@ def main() -> None:
     table.add_column("Eager Steady", justify="right")
     table.add_column("Compiled Warmup", justify="right")
     table.add_column("Compiled Steady", justify="right")
+    table.add_column("Eager FPS", justify="right")
+    table.add_column("Compiled FPS", justify="right")
     table.add_column("Speedup", justify="right")
     table.add_column("Parity", justify="right")
 
@@ -178,12 +180,17 @@ def main() -> None:
         if isinstance(eager_s, (int, float)) and isinstance(comp_s, (int, float)) and comp_s > 0:
             speedup = f"{eager_s / comp_s:.2f}x"
 
+        eager_fps = f"{1000.0 / eager_s:.1f}" if isinstance(eager_s, (int, float)) and eager_s > 0 else ""
+        compiled_fps = f"{1000.0 / comp_s:.1f}" if isinstance(comp_s, (int, float)) and comp_s > 0 else ""
+
         table.add_row(
             f"{r['resolution']}x{r['resolution']}",
             str(r.get("eager_warmup_ms", "")),
             str(r.get("eager_steady_ms", "")),
             str(r.get("compiled_warmup_ms", "")),
             str(r.get("compiled_steady_ms", "")),
+            eager_fps,
+            compiled_fps,
             speedup,
             str(r.get("parity_max_diff", "")),
         )
