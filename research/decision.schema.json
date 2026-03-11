@@ -42,7 +42,8 @@
         "matmul-ordering",
         "addmm-fusion",
         "dtype-cast-cleanup",
-        "async-pipeline"
+        "async-pipeline",
+        "refiner-dilated-conv-fix"
       ],
       "description": "Which program.md search area this targets"
     },

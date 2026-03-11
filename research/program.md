@@ -107,10 +107,35 @@ Reduce steady-state inference latency and peak memory usage on Apple Silicon whi
 - Ensure matmul operands are contiguous along the right axis
 - May help with Metal shader vectorization
 
-### 16. Operator fusion hints
-- Structure sequential ops (concat+conv, sigmoid+mul) to maximize MLX compile fusion
-- Avoid python-level intermediates that break lazy graph chains
-- Profile compiled vs eager to find fusion gaps
+### 16. ELIMINATED — Operator fusion hints
+- mx.compile already fuses element-wise ops (depth 11, 24 arrays max)
+- Manual fusion won't beat the compiler for these ops
+
+### 17. Matmul ordering
+- `x @ W.T` faster than `x @ W` for vector-matrix (from "Writing Fast MLX" guide)
+- Check attention projections and decoder linears for suboptimal ordering
+
+### 18. mx.addmm fusion
+- `mx.addmm(c, a, b)` = fused `a @ b + c` in single kernel
+- Applicable to any linear layer with bias add
+
+### 19. Dtype cast cleanup
+- mx.fast functions accumulate in higher precision internally
+- Remove unnecessary astype() before/after mx.fast.layer_norm, mx.fast.scaled_dot_product_attention
+- Use Python scalars instead of mx.array for constants to avoid upcasting
+
+### 20. Async pipeline
+- mx.async_eval() returns immediately, CPU builds next graph while GPU executes
+- Must run in separate stream via mx.new_stream(mx.gpu)
+- For throughput (video), not single-image latency
+
+### 21. Refiner dilated conv fix (ROOT CAUSE)
+- Dilated convolutions (dilation 1,2,4,8) are EXCLUDED from MLX implicit GEMM (PR #3147)
+- Forces explicit im2col fallback: inflates activation memory by 9x (kernel_size^2)
+- This is likely THE dominant bottleneck for both latency and memory
+- Option A: Replace with stride-2 downsample + standard conv + bilinear upsample (needs retraining)
+- Option B: Custom Metal kernel via mx.fast.metal_kernel (same math, no im2col)
+- Expected: 15-20% latency + 15-20% peak memory reduction
 
 ## Out of scope (phase 1)
 

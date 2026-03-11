@@ -246,27 +246,44 @@ experiments. BEFORE choosing your experiment, you MUST:
 Available notes:
 $compound_index
 
-## Allowed search areas
+## KEY INSIGHT — ROOT CAUSE OF PLATEAU
+The model is MEMORY-BANDWIDTH BOUND, not compute-bound. Weight loading = 0.5ms (<1% of 120ms).
+The remaining 119ms is dominated by:
+1. Dilated convolutions in refiner force im2col fallback (9x activation memory inflation)
+2. FP32 backbone activations double bandwidth vs BF16
+3. Hidden non-contiguous tensor copies from Hiera's unroll/reroll across 24 blocks
+
+Read research/compound/deep_dive_findings.md for full analysis.
+
+## Allowed search areas (PRIORITY ORDER — try highest impact first)
+### TOP PRIORITY — highest expected impact
+2. selective-precision — BACKBONE BF16 (not just decoders). BF16 has same 8-bit exponent as FP32 (preserves dynamic range, unlike FP16 which failed). Only final sigmoid needs FP32. Expected: 20-30% latency by halving activation traffic.
+5. tensor-layout-staging — AUDIT Hiera unroll/reroll for hidden non-contiguous copies. MLX inserts implicit memory copies when strided tensors hit Linear/SDPA kernels. Minimize reroll frequency. Expected: 8-12% latency.
+21. refiner-dilated-conv-fix — Dilated convs force im2col fallback (excluded from implicit GEMM per MLX PR #3147). Replace with stride-2 downsample + standard conv + bilinear upsample per block. Expected: 15-20% latency + memory.
+
+### MEDIUM PRIORITY
+9. token-routing — skip attention for easy tokens (alpha hint near 0/1), identity LTRM at stages 2-3. Expected: 50-80% attention FLOP reduction at 512x512 green screen.
+14. stream-pipelining — dispatch alpha and fg decoder heads to parallel GPU command queues via mx.stream(). Only works without compile_forward. Expected: 3-5%.
+11. fused-metal-kernels — mx.fast.metal_kernel() for refiner conv+GN+GELU. NOTE: custom kernels break mx.compile fusion, so net effect is unclear.
+17. matmul-ordering — ensure x @ W.T pattern (faster than x @ W) in attention projections and decoder linears.
+18. addmm-fusion — use mx.addmm for fused add+matmul in decoder/refiner linear layers.
+19. dtype-cast-cleanup — remove unnecessary astype() calls around mx.fast functions (they accumulate in higher precision internally).
+
+### LOWER PRIORITY
 1. tile-lifecycle-memory — del refs, gc timing, avoid redundant allocs in tiled loops
-2. selective-precision — refiner fp16, backbone fp32, decoder bf16
 3. tiled-inference-heuristics — tile size/overlap sweeps, blending strategies
 4. compile-path-policy — mx.compile for fixed shapes, warmup-aware
-5. tensor-layout-staging — contiguity, minimize NCHW-NHWC transitions
-6. backbone-quantization — ONLY stages 1-3 (dims 224,448,896 divisible by 32). Stage 0 (dim=112) must stay fp32. Write custom quantize that skips incompatible layers.
+6. backbone-quantization — ONLY stages 1-3 (dims 224,448,896 divisible by 32). Stage 0 (dim=112) must stay fp32.
 7. mlx-memory-tuning — mx.set_wired_limit() for p95, mx.set_cache_limit() for peak memory
-8. ELIMINATED — nn.LayerNorm already dispatches to mx.fast.layer_norm. DO NOT attempt.
-9. token-routing — skip attention for easy tokens (alpha hint near 0/1), identity LTRM at stages 2-3
 10. refiner-only-tiling — backbone+decoder once at full res, tile only CNN refiner
-11. fused-metal-kernels — mx.fast.metal_kernel() for conv+GN+GELU in refiner blocks
-12. sdpa-attention — replace manual attention with mx.fast.scaled_dot_product_attention in Hiera MaskUnitAttention
-13. graph-materialization — strategic mx.eval placement to reduce peak live tensor count without hurting fusion
-14. stream-pipelining — use mx.stream() to overlap backbone compute with decoder weight prefetch
-15. weight-format — convert weights to contiguous/optimal layout at load time, transpose for matmul efficiency
-16. ELIMINATED — mx.compile already fuses element-wise ops (depth 11, 24 arrays). Manual fusion won't beat compiler.
-17. matmul-ordering — ensure x @ W.T pattern (faster than x @ W) in attention projections and decoder linears
-18. addmm-fusion — use mx.addmm for fused add+matmul in decoder/refiner linear layers
-19. dtype-cast-cleanup — remove unnecessary astype() calls around mx.fast functions (they accumulate in higher precision internally)
+12. sdpa-attention — ALREADY APPLIED. mx.fast.scaled_dot_product_attention is already used in MaskUnitAttention.
+13. graph-materialization — strategic materialization to reduce peak live tensor count
+15. weight-format — convert weights to contiguous/optimal layout at load time
 20. async-pipeline — mx.async_eval + mx.new_stream for overlapping preprocessing with GPU inference
+
+### ELIMINATED — DO NOT ATTEMPT
+8. ELIMINATED — nn.LayerNorm already dispatches to mx.fast.layer_norm.
+16. ELIMINATED — mx.compile already fuses element-wise ops (depth 11, 24 arrays).
 
 ## Previous iteration error (if any)
 $last_error_block
