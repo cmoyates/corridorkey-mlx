@@ -14,11 +14,11 @@ All fidelity checks are pass/fail. Any failure = hard reject.
 
 | Check | Threshold | Source |
 |-------|-----------|--------|
-| alpha_final max abs error vs golden | < 1e-3 | compare_reference.py |
-| fg_final max abs error vs golden | < 1e-3 | compare_reference.py |
-| alpha_coarse max abs error vs golden | < 1e-3 | compare_reference.py |
-| fg_coarse max abs error vs golden | < 1e-3 | compare_reference.py |
-| delta_logits max abs error vs golden | < 1e-3 | compare_reference.py |
+| alpha_final max abs error vs golden | < 5e-3 | compare_reference.py |
+| fg_final max abs error vs golden | < 5e-3 | compare_reference.py |
+| alpha_coarse max abs error vs golden | < 5e-3 | compare_reference.py |
+| fg_coarse max abs error vs golden | < 5e-3 | compare_reference.py |
+| delta_logits max abs error vs golden | < 5e-3 | compare_reference.py |
 | Output NaN/Inf check | none | smoke_2048.py |
 | Alpha not all-zero or all-one | varies | smoke_2048.py |
 

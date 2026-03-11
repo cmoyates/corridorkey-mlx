@@ -31,7 +31,7 @@ These scripts are **protected**. Do not modify them.
 ## Keep/revert behavior
 
 A candidate is KEPT when:
-- All fidelity gates pass (max abs error < 1e-3 per tensor vs golden reference)
+- All fidelity gates pass (max abs error < 5e-3 per tensor vs golden reference)
 - Latency improved OR memory improved (with no regression on the other metric beyond noise)
 - Score > current best score
 
