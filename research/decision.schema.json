@@ -33,7 +33,16 @@
         "layernorm-fusion",
         "token-routing",
         "refiner-only-tiling",
-        "fused-metal-kernels"
+        "fused-metal-kernels",
+        "sdpa-attention",
+        "graph-materialization",
+        "stream-pipelining",
+        "weight-format",
+        "operator-fusion",
+        "matmul-ordering",
+        "addmm-fusion",
+        "dtype-cast-cleanup",
+        "async-pipeline"
       ],
       "description": "Which program.md search area this targets"
     },

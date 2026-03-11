@@ -146,8 +146,21 @@ Adapt your approach based on this error. Do NOT retry the exact same experiment.
     last_error_block="(none)"
   fi
 
-  # Last 5 experiments from log
-  last_experiments="$(tail -5 "$ROOT/research/experiments.jsonl" 2>/dev/null || echo "(no experiments yet)")"
+  # ALL experiments from log (proposer must see full history to avoid repeats)
+  last_experiments="$(cat "$ROOT/research/experiments.jsonl" 2>/dev/null || echo "(no experiments yet)")"
+
+  # Extract unique tried experiment names for explicit dedup
+  local tried_names
+  tried_names="$(python3 -c "
+import json, sys
+names = set()
+for line in open('$ROOT/research/experiments.jsonl'):
+    line = line.strip()
+    if not line or line.startswith('{') is False: continue
+    try: names.add(json.loads(line)['experiment_name'])
+    except: pass
+for n in sorted(names): print(f'  - {n}')
+" 2>/dev/null || echo "  (none)")"
 
   # Current best result
   best_result="$(cat "$ROOT/research/best_result.json" 2>/dev/null || echo "(no best result yet)")"
@@ -214,8 +227,13 @@ Example (artifacts/latest_decision.json):
 ## Current best result
 $best_result
 
-## Recent experiments (last 5)
+## ALL previous experiments (full history)
 $last_experiments
+
+## ALREADY TRIED — DO NOT REPEAT these experiment names or approaches:
+$tried_names
+You MUST choose an experiment that is NOT in the list above. If you propose a
+duplicate name, the loop will reject it. Try a genuinely different approach.
 
 ## Compound learnings (do not repeat failed approaches)
 The directory research/compound/ contains hard-won lessons from previous
@@ -236,10 +254,19 @@ $compound_index
 5. tensor-layout-staging — contiguity, minimize NCHW-NHWC transitions
 6. backbone-quantization — ONLY stages 1-3 (dims 224,448,896 divisible by 32). Stage 0 (dim=112) must stay fp32. Write custom quantize that skips incompatible layers.
 7. mlx-memory-tuning — mx.set_wired_limit() for p95, mx.set_cache_limit() for peak memory
-8. layernorm-fusion — check if nn.LayerNorm dispatches to mx.fast.layer_norm, swap if not
+8. ELIMINATED — nn.LayerNorm already dispatches to mx.fast.layer_norm. DO NOT attempt.
 9. token-routing — skip attention for easy tokens (alpha hint near 0/1), identity LTRM at stages 2-3
 10. refiner-only-tiling — backbone+decoder once at full res, tile only CNN refiner
 11. fused-metal-kernels — mx.fast.metal_kernel() for conv+GN+GELU in refiner blocks
+12. sdpa-attention — replace manual attention with mx.fast.scaled_dot_product_attention in Hiera MaskUnitAttention
+13. graph-materialization — strategic mx.eval placement to reduce peak live tensor count without hurting fusion
+14. stream-pipelining — use mx.stream() to overlap backbone compute with decoder weight prefetch
+15. weight-format — convert weights to contiguous/optimal layout at load time, transpose for matmul efficiency
+16. ELIMINATED — mx.compile already fuses element-wise ops (depth 11, 24 arrays). Manual fusion won't beat compiler.
+17. matmul-ordering — ensure x @ W.T pattern (faster than x @ W) in attention projections and decoder linears
+18. addmm-fusion — use mx.addmm for fused add+matmul in decoder/refiner linear layers
+19. dtype-cast-cleanup — remove unnecessary astype() calls around mx.fast functions (they accumulate in higher precision internally)
+20. async-pipeline — mx.async_eval + mx.new_stream for overlapping preprocessing with GPU inference
 
 ## Previous iteration error (if any)
 $last_error_block
@@ -326,6 +353,21 @@ for ((i=1; i<=ITERATIONS; i++)); do
 
   EXP_NAME="$(read_json_field "$DECISION_PATH" experiment_name)"
   echo "[info] Experiment: $EXP_NAME"
+
+  # --- Gate 1.5: Duplicate experiment detection ---
+  if grep -q "\"experiment_name\": \"$EXP_NAME\"" "$ROOT/research/experiments.jsonl" 2>/dev/null; then
+    echo "[DUPLICATE] Experiment '$EXP_NAME' was already tried. Reverting."
+    LAST_ERROR="DUPLICATE EXPERIMENT: '$EXP_NAME' was already tried and logged in experiments.jsonl. You MUST choose a completely different experiment name and approach. Read the full experiment history carefully."
+    revert_changes
+    STALLS=$((STALLS + 1)); STALL_TYPE="duplicate"
+    log_iteration "$i" "REVERT" "duplicate_experiment" "$EXP_NAME"
+    iter_cleanup
+    if (( STALLS >= MAX_STALLS )); then
+      echo "Stopping: $STALLS consecutive failures (type: $STALL_TYPE)"
+      break
+    fi
+    continue
+  fi
 
   # --- Gate 2: Protected surface check ---
   echo "[gate] Checking protected surfaces..."

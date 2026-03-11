@@ -84,6 +84,34 @@ Reduce steady-state inference latency and peak memory usage on Apple Silicon whi
 | 6 | Refiner-only tiling | S10 | Medium | Memory at high res |
 | 7 | Fused Metal refiner kernels | S11 | High | Bandwidth reduction |
 
+## Phase 3 search areas (from plateau analysis 2026-03-11)
+
+### 12. SDPA attention for Hiera
+- Replace manual attention math with `mx.fast.scaled_dot_product_attention`
+- Fused kernel avoids materializing full NxN attention matrix
+- Applied in `MaskUnitAttention` — already windowed, SDPA handles the rest
+- Risk: must match windowed attention semantics exactly
+
+### 13. Graph materialization strategy
+- Strategic materialization placement to reduce peak live tensor count
+- Profile which tensors are kept alive longest, force materialization of consumed ones
+- Different from stage_gc: finer granularity within backbone stages
+
+### 14. Stream pipelining
+- `mx.stream()` to overlap compute with memory operations
+- Backbone stage N compute overlapped with stage N+1 weight prefetch
+- MLX supports explicit stream scheduling on Apple GPU
+
+### 15. Weight format optimization
+- Convert weights to optimal memory layout at load time
+- Ensure matmul operands are contiguous along the right axis
+- May help with Metal shader vectorization
+
+### 16. Operator fusion hints
+- Structure sequential ops (concat+conv, sigmoid+mul) to maximize MLX compile fusion
+- Avoid python-level intermediates that break lazy graph chains
+- Profile compiled vs eager to find fusion gaps
+
 ## Out of scope (phase 1)
 
 - Architecture redesign
