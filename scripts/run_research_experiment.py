@@ -50,26 +50,12 @@ PARITY_TENSORS = [
 
 def get_peak_memory_mb() -> float:
     """Read peak Metal memory in MB."""
-    try:
-        return mx.get_peak_memory() / (1024 * 1024)
-    except AttributeError:
-        pass
-    try:
-        return mx.metal.get_peak_memory() / (1024 * 1024)
-    except Exception:
-        return 0.0
+    return mx.get_peak_memory() / (1024 * 1024)
 
 
 def reset_peak_memory() -> None:
     """Reset peak memory counter."""
-    try:
-        mx.reset_peak_memory()
-    except AttributeError:
-        pass
-    try:
-        mx.metal.reset_peak_memory()
-    except Exception:
-        pass
+    mx.reset_peak_memory()
 
 
 def _materialize(*arrays: mx.array) -> None:

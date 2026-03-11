@@ -89,23 +89,12 @@ def report_diagnostics(result: dict[str, np.ndarray]) -> bool:
 
 def get_peak_memory_mb() -> float | None:
     """Read peak memory in MB, or None if unavailable."""
-    import contextlib
-
-    with contextlib.suppress(AttributeError):
-        return mx.get_peak_memory() / (1024 * 1024)
-    with contextlib.suppress(Exception):
-        return mx.metal.get_peak_memory() / (1024 * 1024)
-    return None
+    return mx.get_peak_memory() / (1024 * 1024)
 
 
 def reset_peak_memory() -> None:
-    """Reset peak memory counter if available."""
-    import contextlib
-
-    with contextlib.suppress(AttributeError):
-        mx.reset_peak_memory()
-    with contextlib.suppress(Exception):
-        mx.metal.reset_peak_memory()
+    """Reset peak memory counter."""
+    mx.reset_peak_memory()
 
 
 def main() -> None:

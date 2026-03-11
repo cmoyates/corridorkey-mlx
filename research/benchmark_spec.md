@@ -51,7 +51,7 @@ All fidelity checks are pass/fail. Any failure = hard reject.
 - Min = best-case (useful for ceiling analysis)
 
 ### Peak memory
-- Measured via mx.metal.get_peak_memory() (or mx.get_peak_memory())
+- Measured via mx.get_peak_memory()
 - Reset before each measurement run
 - Measured on a fresh model instance (not reused from latency benchmark)
 - gc.collect() + mx.clear_cache() before reset
