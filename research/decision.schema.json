@@ -27,7 +27,13 @@
         "selective-precision",
         "tiled-inference-heuristics",
         "compile-path-policy",
-        "tensor-layout-staging"
+        "tensor-layout-staging",
+        "backbone-quantization",
+        "mlx-memory-tuning",
+        "layernorm-fusion",
+        "token-routing",
+        "refiner-only-tiling",
+        "fused-metal-kernels"
       ],
       "description": "Which program.md search area this targets"
     },

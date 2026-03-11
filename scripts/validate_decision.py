@@ -24,6 +24,12 @@ VALID_SEARCH_AREAS = {
     "tiled-inference-heuristics",
     "compile-path-policy",
     "tensor-layout-staging",
+    "backbone-quantization",
+    "mlx-memory-tuning",
+    "layernorm-fusion",
+    "token-routing",
+    "refiner-only-tiling",
+    "fused-metal-kernels",
 }
 
 REQUIRED_FIELDS = {"experiment_name", "hypothesis", "files_changed", "search_area"}
