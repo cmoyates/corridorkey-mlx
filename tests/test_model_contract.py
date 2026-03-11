@@ -93,11 +93,11 @@ def test_sigmoid_outputs_in_range(model_output: dict[str, mx.array]) -> None:
 # Backbone shape contract
 # ---------------------------------------------------------------------------
 
+BACKBONE_STRIDES = [4, 8, 16, 32]
+BACKBONE_CHANNELS = [112, 224, 448, 896]
 BACKBONE_SHAPES = [
-    (1, 128, 128, 112),  # stride 4
-    (1, 64, 64, 224),  # stride 8
-    (1, 32, 32, 448),  # stride 16
-    (1, 16, 16, 896),  # stride 32
+    (1, IMG_SIZE // s, IMG_SIZE // s, c)
+    for s, c in zip(BACKBONE_STRIDES, BACKBONE_CHANNELS)
 ]
 
 
