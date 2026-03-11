@@ -152,12 +152,18 @@ Adapt your approach based on this error. Do NOT retry the exact same experiment.
   # Current best result
   best_result="$(cat "$ROOT/research/best_result.json" 2>/dev/null || echo "(no best result yet)")"
 
-  # Compound notes — last 3 full contents (most recent learnings)
+  # Compound notes — ALL notes, newest first, capped at 60 lines each
   local compound_notes=""
+  local max_lines_per_note=60
   if ls "$ROOT/research/compound/"*.md 1>/dev/null 2>&1; then
-    compound_notes="$(ls -t "$ROOT/research/compound/"*.md | head -3 | while read -r f; do
+    compound_notes="$(ls -t "$ROOT/research/compound/"*.md | while read -r f; do
       echo "### $(basename "$f")"
-      cat "$f"
+      head -n "$max_lines_per_note" "$f"
+      local total_lines
+      total_lines="$(wc -l < "$f")"
+      if (( total_lines > max_lines_per_note )); then
+        echo "... (truncated, $((total_lines - max_lines_per_note)) more lines)"
+      fi
       echo ""
     done)"
   else
@@ -210,7 +216,11 @@ $best_result
 ## Recent experiments (last 5)
 $last_experiments
 
-## Compound learnings (MUST READ — do not repeat failed approaches)
+## Compound learnings (MUST READ EVERY NOTE — do not repeat failed approaches)
+CRITICAL: These notes contain hard-won lessons from previous iterations.
+Repeating a failed approach wastes an iteration. Read ALL notes below before
+choosing your experiment.
+
 $compound_notes
 
 ## Allowed search areas
