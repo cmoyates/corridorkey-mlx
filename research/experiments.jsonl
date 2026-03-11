@@ -1,0 +1,1 @@
+{"experiment_name": "backbone-8bit-safe-quantize", "timestamp": "2026-03-11T16:21:02.267116+00:00", "resolution": 512, "verdict": "INCONCLUSIVE", "fidelity_passed": true, "median_ms": 118.72, "p95_ms": 119.27, "peak_memory_mb": 2143.2, "notes": "loop iteration 5", "artifact": "/Users/cristopheryates/Documents/Projects/Python/corridorkey-mlx/artifacts/runs/result-5.json"}
