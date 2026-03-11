@@ -314,6 +314,7 @@ Read research/compound/deep_dive_findings.md for full analysis.
 13. graph-materialization — strategic materialization to reduce peak live tensor count
 15. weight-format — convert weights to contiguous/optimal layout at load time
 20. async-pipeline — mx.async_eval + mx.new_stream for overlapping preprocessing with GPU inference
+22. edge-aware-blend — only ramp tile edges that overlap with adjacent tiles, keep full weight at image boundaries (quality fix, not speed). Source: EZ-CorridorKey.
 
 ### ELIMINATED — DO NOT ATTEMPT
 8. ELIMINATED — nn.LayerNorm already dispatches to mx.fast.layer_norm.

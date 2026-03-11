@@ -181,24 +181,183 @@ CorridorKeyEngine (inference_engine.py)
 
 ---
 
-## Action Items (sorted by expected impact)
+## Action Items (sorted by expected impact, updated 2026-03-11)
 
 | Priority | Item | Source | Effort | Expected Impact |
 |----------|------|--------|--------|-----------------|
-| 1 | MLX quantization (8-bit/4-bit linear layers) | Issue #53 concept | Medium | ~50% checkpoint size reduction, potential speedup on memory-bound ops |
-| 2 | Guided filter alpha post-processing for tiled mode | PR #130 | Low | Better edge quality in tiled inference |
-| 3 | Resolution-scaled matte tightening | PR #130 | Low | Compensate soft edges at small tile sizes |
-| 4 | Original pixel restoration blend | PR #130 | Low | Preserve detail lost in resize round-trip |
-| 5 | Refiner-only tiling (backbone runs once, tile only CNN) | PR #54 | Medium | Less memory overhead than full-model tiling |
-| 6 | Full bf16 model cast (vs selective layer bf16) | PR #104 | Low | Simpler code, ~same memory benefit |
-| 7 | Monitor distilled model checkpoint | PR #109, Issue #107 | None (wait) | Smaller model if released |
+| 1 | Backbone Linear quantization (8-bit) | MLX nn.quantize + Issue #53 | Low | Weight mem + matmul speed (144 Linears) |
+| 2 | mx.set_wired_limit() sweep | MLX API | Low | p95 variance reduction |
+| 3 | mx.set_cache_limit() sweep | MLX API | Low | Peak memory tuning |
+| 4 | nn.LayerNorm -> mx.fast.layer_norm check | MLX API | Low | Free speedup if not already fused |
+| 5 | Token routing (skip attention for easy tokens) | CorridorKey-Engine | Medium | 50-80% attention FLOP reduction |
+| 6 | Refiner-only tiling | PR #54 + Engine impl | Medium | Lower peak mem at high res |
+| 7 | Guided filter alpha post-processing | PR #130 | Low | Tiled edge quality |
+| 8 | Fused Metal refiner kernels | mx.fast.metal_kernel | High | Bandwidth reduction |
+| 9 | Monitor distilled model checkpoint | PR #109, Issue #107 | None (wait) | Smaller model if released |
+| 10 | Edge-aware tile blend weights (no ramp at image boundaries) | EZ-CorridorKey | Low | Quality: prevents alpha darkening at image edges |
+
+---
+
+## 99oblivius/CorridorKey-Engine
+
+**Source:** [github.com/99oblivius/CorridorKey-Engine](https://github.com/99oblivius/CorridorKey-Engine) (4 stars, active as of 2026-03-11)
+**Description:** Community fork — production-oriented inference engine with optimization config system, tiled refiner, FlashAttention patching, and token routing.
+
+### Key components
+
+#### OptimizedGreenFormer (`CorridorKeyModule/core/optimized_model.py`)
+- Extends upstream `GreenFormer` with `OptimizationConfig` dataclass (frozen, profile-based)
+- **Tiled CNN Refiner** (`TiledCNNRefiner`): processes refiner in overlapping 512x512 tiles with linear blend ramps, cached blend weights. Processes tiles independently through stem→res1-4→final. Mathematically lossless (128px overlap > 65px receptive field).
+- **FlashAttention patching** (`_patch_hiera_global_attention`): monkey-patches global-attention Hiera blocks to produce contiguous 4D Q/K/V for SDPA. Without this, PyTorch falls back to math backend (materializes full NxN attention matrix). Patches only `use_mask_unit_attn=False` blocks.
+- **Token routing** (`HintBasedTokenRouter` + `LTRM`): routes "easy" tokens (alpha hint near 0 or 1) to lightweight LTRM module (O(N)) instead of global attention (O(N^2)). Applied at stages 2-3 only. Zero-init on LTRM fc2 → identity residual at init (checkpoint-compatible). **Requires fine-tuning** — disabled by default.
+
+#### LTRM (Lightweight Token Refinement Module)
+- Architecture: LayerNorm → Linear expand → GELU → DWConv 5x5 → GELU → Linear project → ECA (Efficient Channel Attention) residual
+- Zero-init fc2 weight+bias so output is zero at init → identity via residual
+- ECA: global avg pool → adaptive 1D conv → sigmoid gate (channel attention)
+- Handles ragged token subsets (skips DWConv when spatial layout is broken)
+
+#### Optimization profiles
+- `original`: no optimizations
+- `optimized`: flash_attention + tiled_refiner + disable_cudnn_benchmark + cache_clearing + fp16 + TF32 matmul
+- `experimental`: all above + token_routing
+- `performance`: max throughput — no tiling, no cache clearing, max-autotune compile, CUDA graphs
+
+#### 4K benchmark results (RTX 4060 Laptop 8GB, DCI 4K 4096x2160, 100 frames)
+- Optimized vs baseline (flash-only): **-40.7% median frame time** (4979ms vs 8402ms)
+- VRAM: **-84% reserved** (1582MB vs 9792MB, baseline spills to system RAM)
+- Total: 786s vs 1119s (-30%)
+
+### Relevance to corridorkey-mlx
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Tiled refiner | Partially implemented | Our tiling is full-model; their refiner-only approach (backbone once, tile refiner) is more memory-efficient at high res. `TiledCNNRefiner` is a clean standalone impl. |
+| Token routing / LTRM | Not implemented | Most impactful for large images. Identity-init means checkpoint-compatible. Needs fidelity testing — they say it requires fine-tuning. |
+| FlashAttention patching | Already done | We use `mx.fast.scaled_dot_product_attention` in MaskUnitAttention. |
+| OptimizationConfig | Not needed | Our config is simpler (constructor params). PyTorch-specific toggles (cudnn, CUDA graphs, TensorRT) don't apply. |
+| Linear blend ramps | Already implemented | Our tiled inference uses linear ramps. |
+
+### Action items from this repo
+
+| Priority | Item | Effort | Expected Impact |
+|----------|------|--------|-----------------|
+| 1 | Refiner-only tiling (backbone+decoder once, tile refiner only) | Medium | Lower peak memory at >512 res |
+| 2 | Token routing with identity LTRM (stages 2-3) | Medium | 50-80% attention FLOP reduction (needs fidelity gate) |
+| 3 | ECA channel attention in LTRM | Low | Quality improvement if token routing is adopted |
+
+---
+
+## New Upstream Activity (since 2026-03-10)
+
+### 11. PR #131 -- Auto-stitch comp frames into MP4 (MERGED 2026-03-11)
+
+**Source:** PR #131 by @blackandredbot
+**Summary:** After inference, automatically stitches Output/Comp PNGs into MP4 via ffmpeg at source fps. Non-fatal if ffmpeg missing.
+
+**Classification:** pipeline-only
+**Relevance:** None for model optimization. CLI/pipeline feature.
+
+---
+
+### 12. PR #132 -- Piecewise sRGB gamma correction for EXR (OPEN)
+
+**Source:** PR #132 by @blackandredbot
+**Summary:** Fixes EXR sequences with `input_is_linear=False` — was silently treating as linear. Replaces naive `pow(1/2.2)` with IEC 61966-2-1 piecewise sRGB transfer function.
+
+**Classification:** color-pipeline
+**Relevance:** If we add EXR support, use proper piecewise sRGB (threshold at 0.0031308). Not relevant to current model optimization.
+
+---
+
+### 13. PR #133 -- Cross-platform uv.lock drift fix (OPEN)
+
+**Source:** PR #133 by @blackandredbot
+**Summary:** Eliminates `uv.lock` drift from platform-conditional torch sources using extras-based backends (`uv sync --extra cuda` / `--extra mlx`).
+
+**Classification:** build-system
+**Relevance:** Good pattern for our pyproject.toml if we ever add CUDA backend support alongside MLX.
+
+---
+
+### 14. PR #100 -- Mac UX improvements (OPEN)
+
+**Source:** PR #100 by @shezmic
+**Summary:** `--backend auto|torch|mlx` CLI flag, platform-specific ffmpeg hints, uv check in launcher, MPS troubleshooting docs.
+
+**Classification:** CLI/docs
+**Relevance:** None for model optimization.
+
+---
+
+### 15. MarcelLieb/CorridorKey — Batched frame processing (branch: batch-processing)
+
+**Source:** [MarcelLieb/CorridorKey](https://github.com/MarcelLieb/CorridorKey) batch-processing branch
+**Summary:** Processes multiple frames in a single forward pass (batch dimension). Multiprocessing pool for parallel CPU postprocessing.
+
+Key changes:
+- `batch_process_frames(images: [B,H,W,3], masks: [B,H,W])` — batched preprocess → model forward → parallel postprocess
+- `torch.multiprocessing.Pool(num_workers)` with `starmap` for postprocessing (despill, composite, etc.)
+- `torch.cuda.empty_cache()` between preprocess→inference and inference→postprocess
+- `num_workers` defaults to `cpu_count() // 2`
+- `torch.compile` moved to function call for flexibility
+
+**Classification:** concept-only (batched inference requires VRAM for multiple frames; postprocess parallelism is framework-agnostic)
+**Relevance:** Low for single-image optimization. If we build a video pipeline, batching MLX inference + parallel numpy postprocess could help throughput. MLX's lazy evaluation already overlaps compute/transfer somewhat.
+
+---
+
+### 16. edenaion/EZ-CorridorKey (426 stars)
+
+**Source:** [github.com/edenaion/EZ-CorridorKey](https://github.com/edenaion/EZ-CorridorKey)
+**Description:** Simplified "EZ" wrapper with GUI, SAM2 tracker integration, Hiera FlashAttention patch.
+
+Key technical details:
+- Contains `patches/hiera-flashattention-v1.patch` and `README-hiera-flashattention.md`
+- `sam2_tracker/` — SAM2-based object tracking integration
+- Tiled refiner with edge-aware blend weights (only ramps internal edges, not image boundaries)
+- `torch.compile(dynamic=False, fullgraph=True)` on refiner tile kernel
+- `@torch.compiler.disable` on tiled forward (dynamic tile iteration)
+
+**Classification:** concept-only
+**Relevance:**
+- **Edge-aware blend weights**: Their `_blend_weight()` only ramps edges that overlap with adjacent tiles, keeping full weight at image boundaries. Our tiled inference ramps all edges. This is a quality improvement worth adopting — prevents alpha darkening at image edges.
+- **Compiled tile kernel**: `torch.compile(dynamic=False, fullgraph=True)` on fixed-size tile processing while disabling compilation on the tile loop. Maps to our approach of `mx.compile` for fixed shapes.
+
+---
+
+### 17. Ahmed791996/ComfyUI-YAK
+
+**Source:** [github.com/Ahmed791996/ComfyUI-YAK](https://github.com/Ahmed791996/ComfyUI-YAK)
+**Description:** ComfyUI custom nodes wrapping CorridorKey CLI via subprocess.
+
+**Classification:** integration-wrapper
+**Relevance:** None — subprocess wrapper, no model changes.
+
+---
+
+### 18. DCRepublic/CorridorKey_Docker_GUI
+
+**Source:** [github.com/DCRepublic/CorridorKey_Docker_GUI](https://github.com/DCRepublic/CorridorKey_Docker_GUI)
+**Description:** Docker + web frontend for CorridorKey.
+
+**Classification:** deployment
+**Relevance:** None for model optimization.
+
+See also: `compound/mlx_framework_findings.md`, `compound/community_repo_findings.md`
 
 ---
 
 ## Unresolved Questions
 
-- Guided filter on MLX: implement via `mx.conv2d` box filters or keep as numpy post-processing?
-- Tile alignment: upstream uses 224px LCM -- does our Hiera port have same constraint or different?
-- Refiner-only tiling: worth implementing given we already have full-model tiling?
-- Full bf16 cast: quality regression vs selective bf16 on our backbone (Hiera fp32 was intentional for parity)?
-- Distilled model timeline: any indication upstream will release a smaller checkpoint?
+- nn.LayerNorm: already dispatches to mx.fast.layer_norm internally?
+- nn.quantize: can apply to backbone submodule only?
+- 8-bit backbone: how much fidelity budget consumed vs golden.npz?
+- mx.depends: works inside mx.compile-d graphs?
+- Token routing without LTRM fine-tuning: identity residual cause quality regression?
+- What fraction of tokens are "easy" at typical green screen input?
+- Dilated conv implicit GEMM: 2D dispatch conditions same as 3D?
+- Guided filter on MLX: mx.conv2d box filters or numpy post-processing?
+- Tile alignment: upstream 224px LCM -- same constraint in our Hiera port?
+- Edge-aware blend: does our tiled inference already skip ramps at image boundaries?
+- Batched inference: does Hiera pos_embed work with batch_size > 1?

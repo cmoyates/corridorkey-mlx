@@ -43,7 +43,8 @@
         "addmm-fusion",
         "dtype-cast-cleanup",
         "async-pipeline",
-        "refiner-dilated-conv-fix"
+        "refiner-dilated-conv-fix",
+        "edge-aware-blend"
       ],
       "description": "Which program.md search area this targets"
     },

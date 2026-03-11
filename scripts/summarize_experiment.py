@@ -21,11 +21,15 @@ BEST_RESULT_PATH = Path("research/best_result.json")
 
 # Priority search areas for suggesting next experiment
 SEARCH_AREAS = [
-    "memory discipline (materialization, gc, cache clearing)",
-    "selective precision (refiner/decoder bf16)",
-    "tiled inference heuristics (tile size, overlap)",
-    "compile-path policy (mx.compile scope)",
-    "tensor layout / contiguity",
+    "selective-precision (backbone bf16)",
+    "tensor-layout-staging (Hiera unroll/reroll contiguity)",
+    "refiner-dilated-conv-fix (inflate kernels, avoid im2col)",
+    "token-routing (skip attention for easy tokens)",
+    "stream-pipelining (parallel decoder heads)",
+    "matmul-ordering (x @ W.T pattern)",
+    "edge-aware-blend (quality: ramp only internal tile edges)",
+    "backbone-quantization (8-bit stages 1-3)",
+    "refiner-only-tiling (tile CNN refiner only)",
 ]
 
 

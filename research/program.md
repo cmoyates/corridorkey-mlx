@@ -137,6 +137,18 @@ Reduce steady-state inference latency and peak memory usage on Apple Silicon whi
 - Option B: Custom Metal kernel via mx.fast.metal_kernel (same math, no im2col)
 - Expected: 15-20% latency + 15-20% peak memory reduction
 
+### 22. Edge-aware tile blend weights
+- Only ramp edges that overlap with adjacent tiles, keep full weight at image boundaries
+- Source: edenaion/EZ-CorridorKey `CNNRefinerModule._blend_weight()`
+- Prevents alpha darkening at image edges in tiled inference
+- Low effort, quality improvement (not speed)
+
+### 23. Batched frame processing
+- Process multiple frames in single forward pass (batch dimension)
+- Parallel CPU postprocessing via multiprocessing pool
+- Source: MarcelLieb/CorridorKey batch-processing branch
+- Only relevant for video pipeline throughput, not single-image latency
+
 ## Out of scope (phase 1)
 
 - Architecture redesign

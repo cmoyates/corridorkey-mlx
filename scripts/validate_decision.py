@@ -22,6 +22,7 @@ VALID_SEARCH_AREAS = {
     "addmm-fusion",
     "async-pipeline",
     "backbone-quantization",
+    "edge-aware-blend",
     "compile-path-policy",
     "dtype-cast-cleanup",
     "fused-metal-kernels",
