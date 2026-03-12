@@ -232,7 +232,29 @@ class HieraMLP(nn.Module):
         self.fc1 = nn.Linear(dim, hidden)
         self.fc2 = nn.Linear(hidden, dim)
 
+        # Pre-transposed weight caches — populated by prepare_transposed_weights()
+        self._fc1_wt: mx.array | None = None
+        self._fc2_wt: mx.array | None = None
+
+    def prepare_transposed_weights(self) -> None:
+        """Pre-transpose fc1/fc2 weights to [in, out] layout.
+
+        nn.Linear stores weight as [out, in] and computes x @ W.T, creating
+        a non-contiguous transposed view each call. Pre-transposing materializes
+        a contiguous [in, out] array so the matmul reads contiguous memory.
+        Called after weights are loaded.
+        """
+        self._fc1_wt = mx.contiguous(self.fc1.weight.T)
+        self._fc2_wt = mx.contiguous(self.fc2.weight.T)
+        # materialize pre-transposed weights — mx.eval is MLX array materialization
+        mx.eval(self._fc1_wt, self._fc2_wt)  # noqa: S307  -- mx.eval, not Python eval
+
     def __call__(self, x: mx.array) -> mx.array:
+        if self._fc1_wt is not None:
+            x = x @ self._fc1_wt + self.fc1.bias
+            x = nn.gelu(x)
+            x = x @ self._fc2_wt + self.fc2.bias
+            return x
         return self.fc2(nn.gelu(self.fc1(x)))
 
 
@@ -581,8 +603,10 @@ class HieraBackbone(nn.Module):
         mx.eval(self.parameters())  # noqa: S307 — mx.eval, not Python eval
 
         # Pre-split QKV weights for contiguous Q/K/V outputs
+        # Pre-transpose MLP weights for contiguous matmul operands
         for blk in self.blocks:
             blk.attn.prepare_split_qkv()
+            blk.mlp.prepare_transposed_weights()
 
     def __call__(self, x: mx.array) -> list[mx.array]:
         """Forward pass.
