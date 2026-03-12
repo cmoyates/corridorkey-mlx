@@ -44,7 +44,7 @@ class GreenFormer(nn.Module):
         compile_refiner: bool = True,
         compile_decoders: bool = True,
         compile_backbone: bool = True,
-        compile_forward: bool = True,
+        compile_forward: bool = False,
         refiner_tile_size: int | None = 512,
     ) -> None:
         super().__init__()
@@ -110,31 +110,36 @@ class GreenFormer(nn.Module):
         if self._fused_decode:
             fused_fn = self._compiled_fused_pair_call or self._fused_pair
             alpha_logits, fg_logits = fused_fn(features)
+            del features
+
+            # Sequential upsample + sigmoid (fused path has no stream benefit)
+            alpha_logits_up = self._logit_upsampler(alpha_logits)
+            fg_logits_up = self._logit_upsampler(fg_logits)
+            if self._compute_dtype != mx.float32:
+                alpha_logits_up = alpha_logits_up.astype(mx.float32)
+                fg_logits_up = fg_logits_up.astype(mx.float32)
+            alpha_coarse = mx.sigmoid(alpha_logits_up)
+            fg_coarse = mx.sigmoid(fg_logits_up)
         else:
             alpha_fn = self._compiled_alpha_decoder_call or self.alpha_decoder
             fg_fn = self._compiled_fg_decoder_call or self.fg_decoder
-            # Dispatch decoders to separate GPU streams for concurrent execution.
-            # Alpha runs on default stream, fg on secondary stream.
+            # Alpha pipeline on default stream
             alpha_logits = alpha_fn(features)  # (B, H/4, W/4, 1)
+            # FG pipeline on secondary stream — decoder + upsample + sigmoid
             with mx.stream(self._fg_stream):
                 fg_logits = fg_fn(features)  # (B, H/4, W/4, 3)
+                fg_logits_up = self._logit_upsampler(fg_logits)  # (B, H, W, 3)
+                if self._compute_dtype != mx.float32:
+                    fg_logits_up = fg_logits_up.astype(mx.float32)
+                fg_coarse = mx.sigmoid(fg_logits_up)
 
-        # Free backbone feature maps — decoders consumed them,
-        # refiner uses rgb+coarse_pred only
-        del features
+            del features
 
-        # Upsample logits to full input resolution (4x from stride-4 decoder)
-        alpha_logits_up = self._logit_upsampler(alpha_logits)  # (B, H, W, 1)
-        fg_logits_up = self._logit_upsampler(fg_logits)  # (B, H, W, 3)
-
-        # Cast back to fp32 before sigmoid (precision at saturation boundaries)
-        if self._compute_dtype != mx.float32:
-            alpha_logits_up = alpha_logits_up.astype(mx.float32)
-            fg_logits_up = fg_logits_up.astype(mx.float32)
-
-        # Coarse predictions via sigmoid (always fp32)
-        alpha_coarse = mx.sigmoid(alpha_logits_up)
-        fg_coarse = mx.sigmoid(fg_logits_up)
+            # Alpha upsample + sigmoid on default stream (parallel with fg stream)
+            alpha_logits_up = self._logit_upsampler(alpha_logits)  # (B, H, W, 1)
+            if self._compute_dtype != mx.float32:
+                alpha_logits_up = alpha_logits_up.astype(mx.float32)
+            alpha_coarse = mx.sigmoid(alpha_logits_up)
 
         # Skip decoder→refiner materialization barrier: decoder outputs are
         # small (~8MB at 512²) so keeping them lazy lets MLX fuse sigmoid +
