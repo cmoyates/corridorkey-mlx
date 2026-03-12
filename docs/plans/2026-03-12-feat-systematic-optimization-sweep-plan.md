@@ -195,9 +195,11 @@ for limit_mb in [0, 512, 1024, 1536, 2048, 3072, 4096]:
 **Risk**: MEDIUM (padding overhead may negate gains)
 **Time**: 3-4 hours
 
-### Exp 38: Interleaved Backbone to Decoder Pipeline
+### ~~Exp 38: Interleaved Backbone to Decoder Pipeline~~ ❌ DISPROVEN
 
 **Hypothesis**: Feed stage 0 features to decoder projection immediately while backbone continues stages 1-3. Overlaps backbone compute with decoder feature projection.
+
+**Result**: DISPROVEN via micro-benchmark. MLX streams show ZERO GPU-GPU overlap on Apple Silicon. Decoder-scale: 0.979x, backbone-scale: 0.990x, 4-matmul/4-stream: 0.961x. Streams add 2-4% dispatch overhead. Apple Silicon command queues don't parallelize compute workloads — only CPU-GPU overlap is possible (already exploited via async_eval).
 
 **Protocol**:
 1. Refactor backbone to yield features per-stage instead of collecting all 4
