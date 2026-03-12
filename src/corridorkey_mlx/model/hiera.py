@@ -478,9 +478,12 @@ class HieraBackbone(nn.Module):
     Hardcoded for hiera_base_plus_224 config with 4-channel input.
     """
 
-    def __init__(self, img_size: int = 512, use_sdpa: bool = True) -> None:
+    def __init__(
+        self, img_size: int = 512, use_sdpa: bool = True, bf16_stages123: bool = False
+    ) -> None:
         super().__init__()
         self.img_size = img_size
+        self._bf16_stages123 = bf16_stages123
 
         # Spatial size after patching
         self.tokens_spatial_shape = [img_size // PATCH_STRIDE[0], img_size // PATCH_STRIDE[1]]
@@ -632,8 +635,14 @@ class HieraBackbone(nn.Module):
 
         # Run blocks, collecting features at stage_ends
         features: list[mx.array] = []
+        stage0_end = self.stage_ends[0]
         for i, blk in enumerate(self.blocks):
             x = blk(x)
+            # Cast activations to bf16 after stage 0 — halves bandwidth for
+            # stages 1-3 (22 of 24 blocks).  Stage 0 stays fp32 for precision
+            # (dim=112, mask-unit attention with q-pooling is sensitive).
+            if i == stage0_end and self._bf16_stages123:
+                x = x.astype(mx.bfloat16)
             if i in self.stage_ends:
                 # Reroll via precomputed gather (single copy vs multi-step chains)
                 perm, size = self._reroll_perms[i]

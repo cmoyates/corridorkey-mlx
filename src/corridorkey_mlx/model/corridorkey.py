@@ -47,6 +47,7 @@ class GreenFormer(nn.Module):
         compile_forward: bool = False,
         refiner_tile_size: int | None = 1024,
         quantize_backbone_stages: bool = True,
+        backbone_bf16_stages123: bool = True,
     ) -> None:
         super().__init__()
         self._compute_dtype = dtype
@@ -61,7 +62,9 @@ class GreenFormer(nn.Module):
         self._compile_backbone = compile_backbone
         self._compile_forward = compile_forward
         self._refiner_tile_size = refiner_tile_size
-        self.backbone = HieraBackbone(img_size=img_size, use_sdpa=use_sdpa)
+        self.backbone = HieraBackbone(
+            img_size=img_size, use_sdpa=use_sdpa, bf16_stages123=backbone_bf16_stages123
+        )
         self.alpha_decoder = DecoderHead(BACKBONE_CHANNELS, EMBED_DIM, output_dim=1)
         self.fg_decoder = DecoderHead(BACKBONE_CHANNELS, EMBED_DIM, output_dim=3)
         self.refiner = CNNRefinerModule()
