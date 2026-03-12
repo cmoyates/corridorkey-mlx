@@ -46,6 +46,7 @@ def load_model(
     wired_limit_bytes: int | None = WIRED_LIMIT_BYTES,
     cache_limit_bytes: int | None = CACHE_LIMIT_BYTES,
     backbone_bf16_stages123: bool = True,
+    decoder_dtype: mx.Dtype | None = mx.bfloat16,
 ) -> GreenFormer:
     """Build GreenFormer and load weights from safetensors checkpoint.
 
@@ -88,6 +89,7 @@ def load_model(
         stage_gc=stage_gc,
         refiner_dtype=refiner_dtype,
         backbone_bf16_stages123=backbone_bf16_stages123,
+        decoder_dtype=decoder_dtype,
     )
     model.load_checkpoint(checkpoint)
     if compile:

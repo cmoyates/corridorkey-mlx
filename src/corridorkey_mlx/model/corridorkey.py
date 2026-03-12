@@ -48,6 +48,7 @@ class GreenFormer(nn.Module):
         refiner_tile_size: int | None = 1024,
         quantize_backbone_stages: bool = True,
         backbone_bf16_stages123: bool = True,
+        decoder_dtype: mx.Dtype | None = mx.bfloat16,
     ) -> None:
         super().__init__()
         self._compute_dtype = dtype
@@ -62,6 +63,7 @@ class GreenFormer(nn.Module):
         self._compile_backbone = compile_backbone
         self._compile_forward = compile_forward
         self._refiner_tile_size = refiner_tile_size
+        self._decoder_dtype = decoder_dtype
         self.backbone = HieraBackbone(
             img_size=img_size, use_sdpa=use_sdpa, bf16_stages123=backbone_bf16_stages123
         )
@@ -294,6 +296,18 @@ class GreenFormer(nn.Module):
         if self._refiner_dtype is not None:
             weight_pairs = [
                 (k, v.astype(self._refiner_dtype)) if k.startswith("refiner.") else (k, v)
+                for k, v in weight_pairs
+            ]
+
+        # Cast decoder weights to reduced precision at load time — keeps
+        # entire decoder path in bf16 when backbone outputs bf16 features,
+        # avoiding fp32 promotion from mixed-precision matmul
+        if self._decoder_dtype is not None:
+            decoder_prefixes = ("alpha_decoder.", "fg_decoder.")
+            weight_pairs = [
+                (k, v.astype(self._decoder_dtype))
+                if k.startswith(decoder_prefixes)
+                else (k, v)
                 for k, v in weight_pairs
             ]
 
