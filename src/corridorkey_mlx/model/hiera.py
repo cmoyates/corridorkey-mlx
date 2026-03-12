@@ -631,7 +631,7 @@ class HieraBackbone(nn.Module):
         x = x + self.pos_embed
 
         # Unroll via precomputed gather (single copy vs 3 reshape-transpose-reshape chains)
-        x = x[:, self._unroll_perm, :]
+        x = mx.take(x, self._unroll_perm, axis=1)
 
         # Run blocks, collecting features at stage_ends
         features: list[mx.array] = []
@@ -646,7 +646,7 @@ class HieraBackbone(nn.Module):
             if i in self.stage_ends:
                 # Reroll via precomputed gather (single copy vs multi-step chains)
                 perm, size = self._reroll_perms[i]
-                feat = x[:, perm, :].reshape(x.shape[0], size[0], size[1], x.shape[-1])
+                feat = mx.take(x, perm, axis=1).reshape(x.shape[0], size[0], size[1], x.shape[-1])
                 features.append(feat)
 
         return features
