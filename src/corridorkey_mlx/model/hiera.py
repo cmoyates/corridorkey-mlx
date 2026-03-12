@@ -266,6 +266,55 @@ class MaskUnitAttention(nn.Module):
         self.qkv = nn.Linear(dim, 3 * dim_out)
         self.proj = nn.Linear(dim_out, dim_out)
 
+        # Pre-split QKV weight/bias caches — populated by prepare_split_qkv()
+        self._q_weight: mx.array | None = None
+        self._k_weight: mx.array | None = None
+        self._v_weight: mx.array | None = None
+        self._q_bias: mx.array | None = None
+        self._k_bias: mx.array | None = None
+        self._v_bias: mx.array | None = None
+
+    def prepare_split_qkv(self) -> None:
+        """Pre-split QKV weights into contiguous Q, K, V arrays.
+
+        Eliminates non-contiguous slices from mx.split(qkv, 3, axis=-1)
+        which force implicit copies on subsequent reshapes. Each pre-split
+        weight is contiguous, so x @ W.T outputs are natively contiguous.
+        Must be called after weights are loaded.
+        """
+        w = self.qkv.weight  # [3*dim_out, dim]
+        d = self.dim_out
+        # Slice along first dim of row-major array — each slice is contiguous
+        self._q_weight = w[:d]
+        self._k_weight = w[d : 2 * d]
+        self._v_weight = w[2 * d :]
+        if "bias" in self.qkv:
+            b = self.qkv.bias  # [3*dim_out]
+            self._q_bias = b[:d]
+            self._k_bias = b[d : 2 * d]
+            self._v_bias = b[2 * d :]
+        # Materialize pre-split weights — mx.eval is MLX graph evaluation
+        mx.eval(  # noqa: S307
+            self._q_weight, self._k_weight, self._v_weight,
+            self._q_bias, self._k_bias, self._v_bias,
+        )
+
+    def _compute_qkv(self, x: mx.array) -> tuple[mx.array, mx.array, mx.array]:
+        """Compute Q, K, V with contiguous outputs.
+
+        Uses pre-split weights (3 separate addmm) if available, otherwise
+        falls back to single QKV linear + split.
+        """
+        if self._q_weight is not None:
+            # 3 separate matmuls — each output is natively contiguous
+            q = mx.addmm(self._q_bias, x, self._q_weight.T)
+            k = mx.addmm(self._k_bias, x, self._k_weight.T)
+            v = mx.addmm(self._v_bias, x, self._v_weight.T)
+            return q, k, v
+        # Fallback: single matmul + non-contiguous split
+        qkv = self.qkv(x)
+        return mx.split(qkv, 3, axis=-1)
+
     def __call__(self, x: mx.array) -> mx.array:
         """Input: [B, N, C]. Output: [B, N', dim_out] (N' = N/q_stride if q_stride>1)."""
         batch_size, num_tokens, _ = x.shape
@@ -273,14 +322,11 @@ class MaskUnitAttention(nn.Module):
             (num_tokens // (self.q_stride * self.window_size)) if self.use_mask_unit_attn else 1
         )
 
-        qkv = self.qkv(x)
+        q, k, v = self._compute_qkv(x)
 
         if num_windows == 1 and self._use_sdpa:
             # Fast path for global attention (stages 2-3, 19 of 24 blocks).
-            # Split QKV along last (contiguous) dim first, then do smaller 4D
-            # transposes per tensor. Avoids large 5D transpose + 3 non-contiguous
-            # slices that force implicit memory copies before SDPA.
-            q, k, v = mx.split(qkv, 3, axis=-1)  # each [B, N, dim_out]
+            # Each q/k/v is contiguous [B, N, dim_out] — reshapes are zero-copy.
             q = mx.transpose(q.reshape(batch_size, num_tokens, self.heads, self.head_dim), axes=(0, 2, 1, 3))
             k = mx.transpose(k.reshape(batch_size, num_tokens, self.heads, self.head_dim), axes=(0, 2, 1, 3))
             v = mx.transpose(v.reshape(batch_size, num_tokens, self.heads, self.head_dim), axes=(0, 2, 1, 3))
@@ -302,11 +348,8 @@ class MaskUnitAttention(nn.Module):
             return x
         else:
             # Windowed path for mask-unit attention (stages 0-1, 5 blocks).
-            # Split QKV along last (contiguous) dim first, then do smaller
-            # 5D reshapes per tensor. Avoids large 6D transpose + 3
-            # non-contiguous slices that force implicit memory copies.
-            q, k, v = mx.split(qkv, 3, axis=-1)  # each [B, N, dim_out]
-
+            # q/k/v already computed by _compute_qkv() above — each is
+            # contiguous [B, N, dim_out], so reshapes below are zero-copy.
             tokens_per_window = num_tokens // num_windows
             # [B, tokens_per_win, num_windows, heads, head_dim]
             q = q.reshape(batch_size, tokens_per_window, num_windows, self.heads, self.head_dim)
@@ -536,6 +579,10 @@ class HieraBackbone(nn.Module):
         self.eval()
         # materialize all parameters
         mx.eval(self.parameters())  # noqa: S307 — mx.eval, not Python eval
+
+        # Pre-split QKV weights for contiguous Q/K/V outputs
+        for blk in self.blocks:
+            blk.attn.prepare_split_qkv()
 
     def __call__(self, x: mx.array) -> list[mx.array]:
         """Forward pass.
