@@ -439,6 +439,32 @@ class HieraBackbone(nn.Module):
         self._unroll_spatial = list(self.tokens_spatial_shape)
         self._unroll_schedule = unroll_schedule
 
+        # Precompute unroll permutation — replaces 3 reshape-transpose-reshape
+        # cycles (each forcing a contiguous copy) with a single indexed gather.
+        n_full = _prod(self.tokens_spatial_shape)
+        dummy = mx.arange(n_full, dtype=mx.float32).reshape(1, n_full, 1)
+        unrolled = unroll(dummy, self._unroll_spatial, unroll_schedule)
+        self._unroll_perm = unrolled.reshape(n_full).astype(mx.int32)
+
+        # Precompute reroll permutations for each stage end — same idea.
+        self._reroll_perms: dict[int, tuple[mx.array, list[int]]] = {}
+        for se_idx in self.stage_ends:
+            remaining_sched, se_size = self._reroll_schedule[se_idx]
+            n_tokens = _prod(se_size)
+            if n_tokens == 0:
+                continue
+            dummy_r = mx.arange(n_tokens, dtype=mx.float32).reshape(1, n_tokens, 1)
+            spatial_out = reroll(dummy_r, se_idx, self._reroll_schedule)
+            self._reroll_perms[se_idx] = (
+                spatial_out.reshape(n_tokens).astype(mx.int32),
+                list(se_size),
+            )
+
+        # Materialize all permutation indices (mx.eval is MLX graph evaluation, not Python eval)
+        mx.eval(self._unroll_perm)
+        for perm, _ in self._reroll_perms.values():
+            mx.eval(perm)
+
         # Patch embedding
         self.patch_embed = HieraPatchEmbed()
 
@@ -524,15 +550,17 @@ class HieraBackbone(nn.Module):
         # Add positional embedding
         x = x + self.pos_embed
 
-        # Unroll for windowed attention
-        x = unroll(x, self._unroll_spatial, self._unroll_schedule)
+        # Unroll via precomputed gather (single copy vs 3 reshape-transpose-reshape chains)
+        x = x[:, self._unroll_perm, :]
 
         # Run blocks, collecting features at stage_ends
         features: list[mx.array] = []
         for i, blk in enumerate(self.blocks):
             x = blk(x)
             if i in self.stage_ends:
-                feat = reroll(x, i, self._reroll_schedule)
+                # Reroll via precomputed gather (single copy vs multi-step chains)
+                perm, size = self._reroll_perms[i]
+                feat = x[:, perm, :].reshape(x.shape[0], size[0], size[1], x.shape[-1])
                 features.append(feat)
 
         return features
