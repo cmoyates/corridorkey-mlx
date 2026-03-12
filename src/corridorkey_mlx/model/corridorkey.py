@@ -6,7 +6,6 @@ All internal operations use NHWC layout.
 
 from __future__ import annotations
 
-import gc
 from typing import TYPE_CHECKING
 
 import mlx.core as mx
@@ -96,11 +95,12 @@ class GreenFormer(nn.Module):
         features = backbone_fn(x)
 
         # Materialize backbone output so MLX can free intermediate graph nodes.
+        # mx.eval alone is sufficient — MLX reference-counts mx.array objects
+        # and frees graph nodes once evaluated. gc.collect() and mx.clear_cache()
+        # add Python-side overhead (several ms) without helping Metal buffer management.
         # NOTE: mx.eval is MLX array materialization, not Python eval()
         if self._stage_gc and not self._compiled:
             mx.eval(features)  # noqa: S307
-            gc.collect()
-            mx.clear_cache()
 
         # Cast features to compute dtype for decoders (bf16 saves memory)
         if self._compute_dtype != mx.float32:
