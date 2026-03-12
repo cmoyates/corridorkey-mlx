@@ -97,13 +97,15 @@ class GreenFormer(nn.Module):
         backbone_fn = self._compiled_backbone_call or self.backbone
         features = backbone_fn(x)
 
-        # Materialize backbone output so MLX can free intermediate graph nodes.
-        # mx.eval alone is sufficient — MLX reference-counts mx.array objects
-        # and frees graph nodes once evaluated. gc.collect() and mx.clear_cache()
-        # add Python-side overhead (several ms) without helping Metal buffer management.
-        # NOTE: mx.eval is MLX array materialization, not Python eval()
+        # Kick off backbone materialization asynchronously so the CPU can
+        # continue building the decoder graph while the GPU finishes backbone
+        # work.  mx.async_eval returns immediately — the arrays are ready by
+        # the time the decoder graph actually dispatches to the GPU.  This
+        # overlaps CPU graph-building with GPU execution, eliminating idle
+        # CPU time at the sync point.
+        # NOTE: mx.async_eval is MLX async materialization, not Python eval()
         if self._stage_gc and not self._compiled:
-            mx.eval(features)  # noqa: S307
+            mx.async_eval(*features)  # noqa: S307  -- mx.async_eval, not Python eval
 
         # Cast features to compute dtype for decoders (bf16 saves memory)
         if self._compute_dtype != mx.float32:
@@ -140,14 +142,14 @@ class GreenFormer(nn.Module):
             alpha_logits_up = self._logit_upsampler(alpha_logits)  # (B, H, W, 1)
             alpha_coarse = mx.sigmoid(alpha_logits_up)
 
-        # Materialize decoder outputs before refiner to free decoder intermediate
-        # buffers.  Refiner's dilated convolutions trigger im2col fallback (9x
-        # activation inflation); releasing decoder graph nodes first reduces
-        # peak memory overlap.  The materialized tensors are small (~8-32 MB
-        # depending on resolution) so the sync cost is negligible.
-        # NOTE: mx.eval is MLX array materialization, not Python eval()
+        # Async-materialize decoder outputs before refiner to free decoder
+        # intermediate buffers.  Refiner's dilated convolutions trigger im2col
+        # fallback (9x activation inflation); releasing decoder graph nodes
+        # first reduces peak memory overlap.  async_eval lets the CPU continue
+        # building the refiner graph while the GPU finishes decoder work.
+        # NOTE: mx.async_eval is MLX async materialization, not Python eval()
         if self._stage_gc and not self._compiled:
-            mx.eval(alpha_logits_up, fg_logits_up, alpha_coarse, fg_coarse)  # noqa: S307
+            mx.async_eval(alpha_logits_up, fg_logits_up, alpha_coarse, fg_coarse)  # noqa: S307  -- mx.async_eval, not Python eval
 
         # Refiner receives coarse predictions (optionally in reduced precision)
         rgb = x[:, :, :, :3]  # (B, H, W, 3)
