@@ -40,7 +40,7 @@ class GreenFormer(nn.Module):
         slim: bool = False,
         use_sdpa: bool = True,
         stage_gc: bool = True,
-        refiner_dtype: mx.Dtype | None = None,
+        refiner_dtype: mx.Dtype | None = mx.bfloat16,
         compile_refiner: bool = True,
         compile_decoders: bool = True,
         compile_backbone: bool = True,
