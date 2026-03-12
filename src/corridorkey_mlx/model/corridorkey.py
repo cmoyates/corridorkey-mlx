@@ -45,7 +45,7 @@ class GreenFormer(nn.Module):
         compile_decoders: bool = True,
         compile_backbone: bool = True,
         compile_forward: bool = False,
-        refiner_tile_size: int | None = 512,
+        refiner_tile_size: int | None = 1024,
         quantize_backbone_stages: bool = True,
     ) -> None:
         super().__init__()
