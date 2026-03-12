@@ -115,11 +115,14 @@ class GreenFormer(nn.Module):
             # Sequential upsample + sigmoid (fused path has no stream benefit)
             alpha_logits_up = self._logit_upsampler(alpha_logits)
             fg_logits_up = self._logit_upsampler(fg_logits)
+            # Sigmoid in native dtype (bf16) — coarse stays bf16 for refiner,
+            # avoiding fp32 round-trip (cast up then back down).
+            alpha_coarse = mx.sigmoid(alpha_logits_up)
+            fg_coarse = mx.sigmoid(fg_logits_up)
+            # Defer fp32 cast to after sigmoid — only needed for final delta addition
             if self._compute_dtype != mx.float32:
                 alpha_logits_up = alpha_logits_up.astype(mx.float32)
                 fg_logits_up = fg_logits_up.astype(mx.float32)
-            alpha_coarse = mx.sigmoid(alpha_logits_up)
-            fg_coarse = mx.sigmoid(fg_logits_up)
         else:
             alpha_fn = self._compiled_alpha_decoder_call or self.alpha_decoder
             fg_fn = self._compiled_fg_decoder_call or self.fg_decoder
@@ -129,17 +132,19 @@ class GreenFormer(nn.Module):
             with mx.stream(self._fg_stream):
                 fg_logits = fg_fn(features)  # (B, H/4, W/4, 3)
                 fg_logits_up = self._logit_upsampler(fg_logits)  # (B, H, W, 3)
-                if self._compute_dtype != mx.float32:
-                    fg_logits_up = fg_logits_up.astype(mx.float32)
+                # Sigmoid in native dtype (bf16) — no fp32 cast needed here
                 fg_coarse = mx.sigmoid(fg_logits_up)
 
             del features
 
             # Alpha upsample + sigmoid on default stream (parallel with fg stream)
             alpha_logits_up = self._logit_upsampler(alpha_logits)  # (B, H, W, 1)
+            alpha_coarse = mx.sigmoid(alpha_logits_up)
+
+            # Defer fp32 cast — only needed for final delta addition (lines below)
             if self._compute_dtype != mx.float32:
                 alpha_logits_up = alpha_logits_up.astype(mx.float32)
-            alpha_coarse = mx.sigmoid(alpha_logits_up)
+                fg_logits_up = fg_logits_up.astype(mx.float32)
 
         # Skip decoder→refiner materialization barrier: decoder outputs are
         # small (~8MB at 512²) so keeping them lazy lets MLX fuse sigmoid +
@@ -175,8 +180,8 @@ class GreenFormer(nn.Module):
 
         if self._slim:
             return {
-                "alpha_coarse": alpha_coarse,
-                "fg_coarse": fg_coarse,
+                "alpha_coarse": alpha_coarse.astype(mx.float32),
+                "fg_coarse": fg_coarse.astype(mx.float32),
                 "alpha_final": alpha_final,
                 "fg_final": fg_final,
             }
@@ -186,8 +191,8 @@ class GreenFormer(nn.Module):
             "fg_logits": fg_logits.astype(mx.float32),
             "alpha_logits_up": alpha_logits_up,
             "fg_logits_up": fg_logits_up,
-            "alpha_coarse": alpha_coarse,
-            "fg_coarse": fg_coarse,
+            "alpha_coarse": alpha_coarse.astype(mx.float32),
+            "fg_coarse": fg_coarse.astype(mx.float32),
             "delta_logits": delta_logits,
             "alpha_final": alpha_final,
             "fg_final": fg_final,
