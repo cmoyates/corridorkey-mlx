@@ -151,6 +151,37 @@ Reduce steady-state inference latency and peak memory usage on Apple Silicon whi
 - Source: MarcelLieb/CorridorKey batch-processing branch
 - Only relevant for video pipeline throughput, not single-image latency
 
+## Phase 4 search areas (from upstream mining round 4, 2026-03-12)
+
+### 24. Contiguous GroupNorm (refiner) — ACTIVE
+- `nn.GroupNorm(pytorch_compatible=True)` produces non-contiguous output
+- Metal trace: `g3_copyfloat16float16` = 6.94% GPU time (10 instances in refiner)
+- Custom impl to avoid internal transpose while preserving pytorch-compatible semantics
+- exp32 proved: native GroupNorm (no pytorch_compatible) = catastrophic fidelity failure
+- Approach: rewrite normalization math to avoid reshape-transpose-reshape, or fused Metal kernel
+- See: `docs/brainstorms/2026-03-12-contiguous-groupnorm-brainstorm.md`
+
+### 25. mxfp8 quantization for backbone stage 0
+- Stage 0 (dim=112) currently fp32 — can't use int4/int8 (not divisible by 32)
+- mxfp8 (MLX 0.30.3+) has different alignment constraints, might work
+- Would quantize the only unquantized backbone stage
+
+### 26. 5-bit quantization for stages 1-3
+- Currently int8 via safe_quantize
+- MLX 0.31.1 adds 3/5/6-bit QMV kernels
+- 5-bit = more compression than int8, need fidelity check
+
+### 27. mx.clear_cache() between pipeline stages
+- Different from `del backbone` (exp34 = no effect on peak memory)
+- Targets Metal buffer cache specifically
+- Could prevent cache bloat from backbone intermediates during decoder/refiner
+
+### Upstream watch list (2026-03-12)
+- MLX PR #3120: split-K quantized matmul (25-30% faster qmm for small M) — still open
+- MLX PR #3247: per-stream locking for concurrent inference — still open
+- CorridorKey #107: distilled model — closed, no checkpoint
+- CorridorKey #144: quantization — closed, no action
+
 ## Out of scope (phase 1)
 
 - Architecture redesign
