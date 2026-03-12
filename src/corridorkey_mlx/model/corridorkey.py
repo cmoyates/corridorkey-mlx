@@ -45,6 +45,7 @@ class GreenFormer(nn.Module):
         compile_decoders: bool = True,
         compile_backbone: bool = True,
         compile_forward: bool = True,
+        refiner_tile_size: int | None = 512,
     ) -> None:
         super().__init__()
         self._compute_dtype = dtype
@@ -57,6 +58,7 @@ class GreenFormer(nn.Module):
         self._compile_decoders = compile_decoders
         self._compile_backbone = compile_backbone
         self._compile_forward = compile_forward
+        self._refiner_tile_size = refiner_tile_size
         self.backbone = HieraBackbone(img_size=img_size, use_sdpa=use_sdpa)
         self.alpha_decoder = DecoderHead(BACKBONE_CHANNELS, EMBED_DIM, output_dim=1)
         self.fg_decoder = DecoderHead(BACKBONE_CHANNELS, EMBED_DIM, output_dim=3)
@@ -137,13 +139,24 @@ class GreenFormer(nn.Module):
         rgb = x[:, :, :, :3]  # (B, H, W, 3)
         coarse_pred = mx.concatenate([alpha_coarse, fg_coarse], axis=-1)  # (B, H, W, 4)
         refiner_fn = self._compiled_refiner_call or self.refiner
+
+        # Prepare refiner inputs (optionally cast to reduced precision)
         if self._refiner_dtype is not None:
             rgb_r = rgb.astype(self._refiner_dtype)
             coarse_r = coarse_pred.astype(self._refiner_dtype)
-            delta_logits = refiner_fn(rgb_r, coarse_r).astype(mx.float32)  # (B, H, W, 4)
-            del rgb_r, coarse_r
         else:
-            delta_logits = refiner_fn(rgb, coarse_pred)  # (B, H, W, 4)
+            rgb_r, coarse_r = rgb, coarse_pred
+
+        # Tiled refiner reduces peak im2col memory for dilated convolutions
+        ts = self._refiner_tile_size
+        if ts is not None and (rgb_r.shape[1] > ts or rgb_r.shape[2] > ts):
+            delta_logits = self._refiner_tiled(refiner_fn, rgb_r, coarse_r)
+        else:
+            delta_logits = refiner_fn(rgb_r, coarse_r)
+
+        if self._refiner_dtype is not None:
+            delta_logits = delta_logits.astype(mx.float32)  # (B, H, W, 4)
+            del rgb_r, coarse_r
 
         # Final predictions: additive residual in logit space, then sigmoid
         alpha_final = mx.sigmoid(alpha_logits_up + delta_logits[:, :, :, 0:1])
@@ -168,6 +181,60 @@ class GreenFormer(nn.Module):
             "alpha_final": alpha_final,
             "fg_final": fg_final,
         }
+
+    def _refiner_tiled(
+        self,
+        refiner_fn: object,
+        rgb: mx.array,
+        coarse: mx.array,
+    ) -> mx.array:
+        """Run refiner on spatial tiles to reduce peak im2col memory.
+
+        Tiles overlap by 32px (refiner receptive field radius = 31px) to
+        ensure exact equivalence with full-image processing.
+        """
+        ts = self._refiner_tile_size
+        assert ts is not None
+        overlap = 32  # RF radius: stem(1) + res1(2) + res2(4) + res3(8) + res4(16) = 31
+        H = rgb.shape[1]
+        W = rgb.shape[2]
+
+        tile_rows: list[mx.array] = []
+        y = 0
+        while y < H:
+            tile_cols: list[mx.array] = []
+            x = 0
+            while x < W:
+                # Extract tile with overlap padding (clamped to image bounds)
+                y0 = max(0, y - overlap)
+                x0 = max(0, x - overlap)
+                y1 = min(H, y + ts + overlap)
+                x1 = min(W, x + ts + overlap)
+
+                delta_tile = refiner_fn(
+                    rgb[:, y0:y1, x0:x1, :],
+                    coarse[:, y0:y1, x0:x1, :],
+                )
+
+                # Crop to owned region (remove overlap padding)
+                own_y = y - y0
+                own_x = x - x0
+                own_h = min(ts, H - y)
+                own_w = min(ts, W - x)
+                tile_cols.append(
+                    delta_tile[:, own_y : own_y + own_h, own_x : own_x + own_w, :]
+                )
+                x += ts
+
+            if len(tile_cols) > 1:
+                tile_rows.append(mx.concatenate(tile_cols, axis=2))
+            else:
+                tile_rows.append(tile_cols[0])
+            y += ts
+
+        if len(tile_rows) > 1:
+            return mx.concatenate(tile_rows, axis=1)
+        return tile_rows[0]
 
     def load_checkpoint(self, path: str | Path) -> None:
         """Load all weights from converted safetensors checkpoint.
