@@ -291,9 +291,15 @@ class MaskUnitAttention(nn.Module):
 
             x = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.scale)
 
-            # [B, heads, N', head_dim] -> [B, N', heads, head_dim] -> [B, N', dim_out]
-            x = mx.transpose(x, axes=(0, 2, 1, 3))
-            x = x.reshape(batch_size, -1, self.dim_out)
+            # Fused output projection: contract over heads+head_dim directly
+            # on SDPA layout [B, heads, N', head_dim], avoiding the
+            # transpose(0,2,1,3)+reshape copy that makes a contiguous copy
+            # before the proj matmul. 19 of 24 blocks use this path.
+            proj_w = self.proj.weight.reshape(self.dim_out, self.heads, self.head_dim)
+            x = mx.einsum("bhnd,ohd->bno", x, proj_w)
+            if self.proj.bias is not None:
+                x = x + self.proj.bias
+            return x
         else:
             # Windowed path for mask-unit attention (stages 0-1, 5 blocks).
             # Split QKV along last (contiguous) dim first, then do smaller
