@@ -344,6 +344,34 @@ Key technical details:
 **Classification:** deployment
 **Relevance:** None for model optimization.
 
+### 19. alexandremendoncaalvaro/CorridorKey-Runtime (2 stars, active 2026-03-12)
+
+**Source:** [github.com/alexandremendoncaalvaro/CorridorKey-Runtime](https://github.com/alexandremendoncaalvaro/CorridorKey-Runtime)
+**Description:** Production-oriented C++ native runtime for CorridorKey. Library-first architecture with CLI, structured diagnostics (`doctor`, `benchmark`, `--json`), and platform-specific model packs. macOS-first, Windows RTX next.
+
+Key technical details:
+- **MLX C++ API integration**: Uses `mlx::core::import_function()` to load `.mlxfn` bridge files (pre-exported from Python MLX), then `mlx::core::compile()` for compiled inference. No Python dependency at runtime.
+- **Bridge artifact strategy**: `corridorkey_mlx.safetensors` -> Python export script (`scripts/prepare_mlx_model_pack.py`) -> `*_bridge_{512,1024}.mlxfn` files. Resolution encoded in filename.
+- **NHWC float32 input**: ImageNet normalization done CPU-side, 4ch (RGB+hint) packed into single `mlx::core::array` with `no_op` deleter (zero-copy from CPU buffer).
+- **Output extraction**: `mlx::core::contiguous()` + explicit materialize + `memcpy` to CPU buffers. Explicit materialization control.
+- **Stage profiling**: `StageTimingCallback` measures prepare_inputs, mlx_run, materialize_outputs, copy_outputs separately.
+- **Fit-pad preprocessing**: Letterbox pad to model resolution, crop+resize postprocess back to original dimensions.
+- **Compiled function fallback**: If `mlx::core::compile` throws, falls back to raw imported function.
+
+**Classification:** integration-reference (C++ MLX consumer of our safetensors artifact)
+**Relevance:**
+- **Bridge function export**: Their `.mlxfn` approach means they need a Python-side export step (`import_function` / `export_function`). If we expose our model via `mx.export_function()`, this runtime can consume it directly. Worth tracking as a downstream consumer.
+- **C++ MLX patterns**: Shows production patterns for MLX C++ API — compiled function caching, zero-copy input, explicit materialization, stage timing. Reference for anyone embedding our model in native apps.
+- **No model-level optimizations**: Runtime is a thin inference wrapper — all model optimization happens in the Python-side export. Our optimizations (bf16, compiled stages, folded BN) would flow through automatically via the bridge artifact.
+- **Validates our artifact format**: They treat `corridorkey_mlx.safetensors` as THE Apple Silicon artifact, confirming our conversion pipeline is the canonical path.
+
+| Priority | Item | Effort | Expected Impact |
+|----------|------|--------|-----------------|
+| 1 | Add `mx.export_function()` bridge export to our pipeline | Medium | Enable C++ runtime consumption |
+| 2 | Coordinate model resolution / artifact naming conventions | Low | Compatibility |
+
+---
+
 See also: `compound/mlx_framework_findings.md`, `compound/community_repo_findings.md`
 
 ---
