@@ -67,6 +67,18 @@ class CNNRefinerModule(nn.Module):
 
         refiner_output_channels = 4  # delta for alpha (1) + delta for fg (3)
         self.final = nn.Conv2d(REFINER_CHANNELS, refiner_output_channels, kernel_size=1)
+        # Precomputed 2D weight for 1x1 conv bypass (set in prepare_inference)
+        self._final_weight_2d: mx.array | None = None
+
+    def prepare_inference(self) -> None:
+        """Precompute 2D weight for 1x1 final conv to bypass mx.conv2d dispatch.
+
+        Uses mx.addmm for fused bias+matmul. Call after weights are loaded.
+        """
+        c_out, _, _, c_in = self.final.weight.shape
+        self._final_weight_2d = self.final.weight.reshape(c_out, c_in)
+        # materialize reshaped weight — mx.eval is MLX array materialization
+        mx.eval(self._final_weight_2d)  # noqa: S307
 
     def __call__(self, rgb: mx.array, coarse_pred: mx.array) -> mx.array:
         """Forward pass.
@@ -84,4 +96,7 @@ class CNNRefinerModule(nn.Module):
         x = self.res2(x)
         x = self.res3(x)
         x = self.res4(x)
+        # 1x1 conv as addmm (fused bias+matmul, bypass conv2d dispatch)
+        if self._final_weight_2d is not None:
+            return mx.addmm(self.final.bias, x, self._final_weight_2d.T) * REFINER_SCALE
         return self.final(x) * REFINER_SCALE

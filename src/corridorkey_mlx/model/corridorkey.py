@@ -288,8 +288,11 @@ class GreenFormer(nn.Module):
         mx.eval(self.parameters())  # noqa: S307  -- mx.eval, not Python eval
 
         # Fold BatchNorm into precomputed scale+offset (2 ops vs 5)
+        # Also precomputes 2D weights for 1x1 conv addmm bypass
         self.alpha_decoder.fold_bn()
         self.fg_decoder.fold_bn()
+        # Precompute refiner 1x1 conv weight for addmm bypass
+        self.refiner.prepare_inference()
 
         if self._compile_forward:
             # Whole-forward compilation: fuses backbone + decoders + upsample +

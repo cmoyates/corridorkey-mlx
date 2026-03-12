@@ -74,14 +74,27 @@ class DecoderHead(nn.Module):
 
         Reduces BN from 5 element-wise ops (sub, rsqrt, mul, mul, add) to 2
         (mul, add), simplifying the compiled Metal kernel graph.
+        Also precomputes 2D weights for 1x1 Conv2d layers to bypass conv2d
+        dispatch and enable mx.addmm fusion for bias addition.
         Must be called after weights are loaded and model is in eval mode.
         """
         eps = self.bn.eps
         inv_std = mx.rsqrt(self.bn.running_var + eps)
         self._bn_scale = self.bn.weight * inv_std
         self._bn_offset = self.bn.bias - self.bn.running_mean * self._bn_scale
+
+        # Precompute 2D weights from 1x1 Conv2d layers: (C_out, 1, 1, C_in) -> (C_out, C_in)
+        # Avoids mx.conv2d dispatch overhead; classifier uses mx.addmm for fused bias+matmul
+        c_out_f, _, _, c_in_f = self.linear_fuse.weight.shape
+        self._fuse_weight_2d = self.linear_fuse.weight.reshape(c_out_f, c_in_f)
+        c_out_c, _, _, c_in_c = self.classifier.weight.shape
+        self._classifier_weight_2d = self.classifier.weight.reshape(c_out_c, c_in_c)
+
         # materialize folded params — mx.eval is MLX array materialization
-        mx.eval(self._bn_scale, self._bn_offset)  # noqa: S307
+        mx.eval(  # noqa: S307
+            self._bn_scale, self._bn_offset,
+            self._fuse_weight_2d, self._classifier_weight_2d,
+        )
         self._bn_folded = True
 
     def _apply_bn(self, x: mx.array) -> mx.array:
@@ -124,11 +137,12 @@ class DecoderHead(nn.Module):
 
         # Concatenate in c4, c3, c2, c1 order to match trained weight layout
         fused = mx.concatenate(projected[::-1], axis=-1)  # (B, H/4, W/4, embed_dim*4)
-        fused = self.linear_fuse(fused)
+        # 1x1 conv as matmul (bypass mx.conv2d dispatch); linear_fuse has no bias
+        fused = fused @ self._fuse_weight_2d.T
         fused = self._apply_bn(fused)
         fused = nn.relu(fused)
-        # No dropout at inference (eval mode)
-        return self.classifier(fused)
+        # 1x1 conv as addmm (fused bias+matmul); classifier has bias
+        return mx.addmm(self.classifier.bias, fused, self._classifier_weight_2d.T)
 
     def _project_features(self, features: list[mx.array]) -> list[mx.array]:
         """Project features without upsampling or fusion."""
@@ -145,10 +159,10 @@ class DecoderHead(nn.Module):
     def _fuse_and_classify(self, projected: list[mx.array]) -> mx.array:
         """Fuse pre-upsampled projections and classify."""
         fused = mx.concatenate(projected[::-1], axis=-1)
-        fused = self.linear_fuse(fused)
+        fused = fused @ self._fuse_weight_2d.T
         fused = self._apply_bn(fused)
         fused = nn.relu(fused)
-        return self.classifier(fused)
+        return mx.addmm(self.classifier.bias, fused, self._classifier_weight_2d.T)
 
 
 class FusedDecoderPair(nn.Module):
