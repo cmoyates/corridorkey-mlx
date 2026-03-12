@@ -236,9 +236,15 @@ class GreenFormer(nn.Module):
                 own_x = x - x0
                 own_h = min(ts, H - y)
                 own_w = min(ts, W - x)
-                tile_cols.append(
-                    delta_tile[:, own_y : own_y + own_h, own_x : own_x + own_w, :]
-                )
+                cropped = delta_tile[:, own_y : own_y + own_h, own_x : own_x + own_w, :]
+                # Materialize cropped tile and discard full delta_tile so MLX
+                # can free the im2col buffers (~9x activation inflation from
+                # dilated convolutions) before the next tile starts.  This
+                # reduces peak memory overlap between tiles.
+                # NOTE: mx.eval is MLX array materialization, not Python eval()
+                mx.eval(cropped)  # noqa: S307  -- mx.eval, not Python eval()
+                del delta_tile
+                tile_cols.append(cropped)
                 x += ts
 
             if len(tile_cols) > 1:
