@@ -69,6 +69,9 @@ class GreenFormer(nn.Module):
         self._compiled_fused_pair_call = None
         self._compiled_backbone_call = None
 
+        # Secondary GPU stream for parallel decoder dispatch
+        self._fg_stream = mx.new_stream(mx.gpu)
+
         if fused_decode:
             self._fused_pair = FusedDecoderPair(self.alpha_decoder, self.fg_decoder)
 
@@ -110,8 +113,11 @@ class GreenFormer(nn.Module):
         else:
             alpha_fn = self._compiled_alpha_decoder_call or self.alpha_decoder
             fg_fn = self._compiled_fg_decoder_call or self.fg_decoder
+            # Dispatch decoders to separate GPU streams for concurrent execution.
+            # Alpha runs on default stream, fg on secondary stream.
             alpha_logits = alpha_fn(features)  # (B, H/4, W/4, 1)
-            fg_logits = fg_fn(features)  # (B, H/4, W/4, 3)
+            with mx.stream(self._fg_stream):
+                fg_logits = fg_fn(features)  # (B, H/4, W/4, 3)
 
         # Free backbone feature maps — decoders consumed them,
         # refiner uses rgb+coarse_pred only
