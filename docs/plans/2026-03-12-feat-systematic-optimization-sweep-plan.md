@@ -54,9 +54,11 @@ done
 **Rollback**: N/A (env vars only)
 **Time**: 30 min
 
-### Exp 30: mx.set_wired_limit() Sweep
+### ~~Exp 30: mx.set_wired_limit() Sweep~~ ✅ DONE
 
 **Hypothesis**: Pinning model weights in physical RAM reduces p95 variance and may improve steady-state latency.
+
+**Result**: REVERT — No benefit. Higher limits increase latency (+5-10%), peak memory (+500-700MB), and variance. Default (0/disabled) is optimal. Unified memory on Apple Silicon doesn't benefit from wired limits.
 
 **Protocol**:
 ```python
@@ -71,9 +73,15 @@ for limit_mb in [0, 512, 1024, 1536, 2048, 3072, 4096]:
 **Rollback**: N/A
 **Time**: 15 min
 
-### Exp 31: Fidelity Budget Audit
+### ~~Exp 31: Fidelity Budget Audit~~ ✅ DONE
 
 **Hypothesis**: One specific bf16 conversion consumes disproportionate fidelity budget. Identifying it allows targeted revert for headroom while keeping other gains.
+
+**Result**: Confirmed. Current fg_final headroom is only 8.2% (critical). Error breakdown:
+- **Backbone bf16** → 21.3% of fg_final error. Disabling raises fg headroom to 27.8%. Best lever if headroom becomes blocking.
+- **Refiner bf16** → 52.2% of alpha_final error, only 6.5% of fg_final. Safe to keep.
+- **Decoder bf16** → 5.0% alpha, 7.6% fg. Minor contributor.
+- **All fp32** → 95%+ headroom (0.002/0.006 max_abs). Floor reference.
 
 **Protocol**:
 1. Bisect bf16 conversions: revert each individually, measure max_abs_error @1024
