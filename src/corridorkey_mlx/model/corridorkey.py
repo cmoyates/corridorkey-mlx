@@ -110,7 +110,7 @@ class GreenFormer(nn.Module):
         # CPU time at the sync point.
         # NOTE: mx.async_eval is MLX async materialization, not Python eval()
         if self._stage_gc and not self._compiled:
-            mx.async_eval(*features)  # noqa: S307  -- mx.async_eval, not Python eval
+            mx.async_eval(*features)  # noqa: S307  -- mx.async_eval, not builtins
 
         # Cast features to compute dtype for decoders (bf16 saves memory)
         if self._compute_dtype != mx.float32:

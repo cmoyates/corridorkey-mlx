@@ -96,9 +96,11 @@ for limit_mb in [0, 512, 1024, 1536, 2048, 3072, 4096]:
 
 ## Phase 2: Low-Code, High-Confidence (1-4 hours each)
 
-### Exp 32: GroupNorm pytorch_compatible=False + Weight Remapping
+### ~~Exp 32: GroupNorm pytorch_compatible=False + Weight Remapping~~ ❌ FAILED
 
 **Hypothesis**: Dropping `pytorch_compatible=True` eliminates 10 transpose+copy kernels in refiner (6.94% GPU time, ~8ms @512, ~29ms @1024).
+
+**Result**: REVERT — Catastrophic fidelity failure (alpha=0.987, fg=0.973). Native MLX GroupNorm computes different normalization statistics (non-zero group means). Not a weight permutation issue — fundamentally different reduction axes. `pytorch_compatible=True` is required for correctness.
 
 **Details**: See `docs/brainstorms/2026-03-12-mlx-native-kernel-optimizations-brainstorm.md` Phase A2.
 
@@ -114,9 +116,11 @@ for limit_mb in [0, 512, 1024, 1536, 2048, 3072, 4096]:
 **Risk**: LOW
 **Time**: 2-4 hours
 
-### Exp 33: 1x1 Conv2d to nn.Linear in Decoder
+### ~~Exp 33: 1x1 Conv2d to nn.Linear in Decoder~~ ⏭️ ALREADY DONE
 
 **Hypothesis**: MLX `conv_general` is 3-5x slower than MPS (issue #1409). Decoder 1x1 conv fusion can use `nn.Linear` + reshape instead.
+
+**Result**: Already implemented. `fold_bn()` precomputes 2D weights; forward uses `@ .T` and `mx.addmm` — no `conv2d` dispatch in hot path.
 
 **Protocol**:
 1. Identify 1x1 conv layers in `src/corridorkey_mlx/model/decoder.py`
@@ -129,9 +133,11 @@ for limit_mb in [0, 512, 1024, 1536, 2048, 3072, 4096]:
 **Risk**: LOW (mathematically equivalent)
 **Time**: 2-3 hours
 
-### Exp 34: Phased Model Deletion (del backbone after features)
+### ~~Exp 34: Phased Model Deletion (del backbone after features)~~ ❌ FAILED
 
 **Hypothesis**: Deleting backbone weights after feature extraction frees ~500MB before decoder/refiner run. Different from exp001 (which deleted features, not backbone).
+
+**Result**: REVERT — Zero savings. Peak memory (3319.1MB) is set during backbone forward pass (attention intermediates), not from weight coexistence. Deleting weights afterward doesn't lower the high-water mark.
 
 **Protocol**:
 1. After `features = self.backbone(x)`, insert `del self.backbone; mx.clear_cache()`
