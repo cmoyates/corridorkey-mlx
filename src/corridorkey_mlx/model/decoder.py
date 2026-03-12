@@ -68,6 +68,7 @@ class DecoderHead(nn.Module):
         self._bn_folded = False
         self._bn_scale: mx.array | None = None
         self._bn_offset: mx.array | None = None
+        self._fuse_weight_chunks: list[mx.array] = []
 
     def fold_bn(self) -> None:
         """Fold BatchNorm into precomputed scale+offset for inference.
@@ -90,10 +91,21 @@ class DecoderHead(nn.Module):
         c_out_c, _, _, c_in_c = self.classifier.weight.shape
         self._classifier_weight_2d = self.classifier.weight.reshape(c_out_c, c_in_c)
 
-        # materialize folded params — mx.eval is MLX array materialization
-        mx.eval(  # noqa: S307
+        # Split fusion weight into 4 chunks (one per feature scale) to avoid
+        # allocating the 4*embed_dim concatenated tensor.  Matmul distributes
+        # over concatenation: [A|B|C|D] @ W = A@W0 + B@W1 + C@W2 + D@W3.
+        embed_dim = c_out_f  # output dim of fusion conv = embed_dim
+        # Weight is (embed_dim, 4*embed_dim); split along input dim (axis=1)
+        self._fuse_weight_chunks = [
+            mx.contiguous(self._fuse_weight_2d[:, i * embed_dim : (i + 1) * embed_dim])
+            for i in range(4)
+        ]
+
+        # materialize folded params — mx.eval is MLX array materialization, not Python eval()
+        mx.eval(  # noqa: S307  -- mx.eval, not Python eval()
             self._bn_scale, self._bn_offset,
             self._fuse_weight_2d, self._classifier_weight_2d,
+            *self._fuse_weight_chunks,
         )
         self._bn_folded = True
 
@@ -135,10 +147,18 @@ class DecoderHead(nn.Module):
                 x = up(x)
             projected.append(x)
 
-        # Concatenate in c4, c3, c2, c1 order to match trained weight layout
-        fused = mx.concatenate(projected[::-1], axis=-1)  # (B, H/4, W/4, embed_dim*4)
-        # 1x1 conv as matmul (bypass mx.conv2d dispatch); linear_fuse has no bias
-        fused = fused @ self._fuse_weight_2d.T
+        # Accumulate per-scale matmuls instead of concatenating all 4 projections
+        # into a 4*embed_dim tensor.  Avoids the 1024-channel intermediate alloc.
+        # Matmul distributes: [c4|c3|c2|c1] @ W = c4@W0 + c3@W1 + c2@W2 + c1@W3.
+        # Order: c4, c3, c2, c1 (reversed) to match trained weight layout.
+        if self._fuse_weight_chunks:
+            fused = projected[3] @ self._fuse_weight_chunks[0].T
+            fused = fused + projected[2] @ self._fuse_weight_chunks[1].T
+            fused = fused + projected[1] @ self._fuse_weight_chunks[2].T
+            fused = fused + projected[0] @ self._fuse_weight_chunks[3].T
+        else:
+            fused = mx.concatenate(projected[::-1], axis=-1)
+            fused = fused @ self._fuse_weight_2d.T
         fused = self._apply_bn(fused)
         fused = nn.relu(fused)
         # 1x1 conv as addmm (fused bias+matmul); classifier has bias
@@ -158,8 +178,14 @@ class DecoderHead(nn.Module):
 
     def _fuse_and_classify(self, projected: list[mx.array]) -> mx.array:
         """Fuse pre-upsampled projections and classify."""
-        fused = mx.concatenate(projected[::-1], axis=-1)
-        fused = fused @ self._fuse_weight_2d.T
+        if self._fuse_weight_chunks:
+            fused = projected[3] @ self._fuse_weight_chunks[0].T
+            fused = fused + projected[2] @ self._fuse_weight_chunks[1].T
+            fused = fused + projected[1] @ self._fuse_weight_chunks[2].T
+            fused = fused + projected[0] @ self._fuse_weight_chunks[3].T
+        else:
+            fused = mx.concatenate(projected[::-1], axis=-1)
+            fused = fused @ self._fuse_weight_2d.T
         fused = self._apply_bn(fused)
         fused = nn.relu(fused)
         return mx.addmm(self.classifier.bias, fused, self._classifier_weight_2d.T)
