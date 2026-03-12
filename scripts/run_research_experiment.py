@@ -31,7 +31,7 @@ from corridorkey_mlx.utils.layout import nchw_to_nhwc_np, nhwc_to_nchw_np
 ARTIFACTS_DIR = Path("research/artifacts")
 DEFAULT_CHECKPOINT = Path("checkpoints/corridorkey_mlx.safetensors")
 DEFAULT_FIXTURE = Path("reference/fixtures/golden.npz")
-DEFAULT_RESOLUTION = 512
+DEFAULT_RESOLUTION = 1024
 DEFAULT_WARMUP = 5
 DEFAULT_BENCH = 20
 

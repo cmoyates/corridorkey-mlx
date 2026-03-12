@@ -87,11 +87,13 @@ revert_changes() {
   # Preserve experiment log + best result across reverts
   cp "$ROOT/research/experiments.jsonl" /tmp/_exp_jsonl_backup 2>/dev/null || true
   cp "$ROOT/research/best_result.json" /tmp/_best_result_backup 2>/dev/null || true
+  cp "$ROOT"/research/best_result_*.json /tmp/ 2>/dev/null || true
   cp -r "$ROOT/research/compound" /tmp/_compound_backup 2>/dev/null || true
   git -C "$ROOT" checkout -- . 2>/dev/null || true
   git -C "$ROOT" clean -fd -q 2>/dev/null || true
   cp /tmp/_exp_jsonl_backup "$ROOT/research/experiments.jsonl" 2>/dev/null || true
   cp /tmp/_best_result_backup "$ROOT/research/best_result.json" 2>/dev/null || true
+  cp /tmp/best_result_*.json "$ROOT/research/" 2>/dev/null || true
   cp -r /tmp/_compound_backup "$ROOT/research/compound" 2>/dev/null || true
 }
 
@@ -177,8 +179,12 @@ for line in open('$ROOT/research/experiments.jsonl'):
 for n in sorted(names): print(f'  - {n}')
 " 2>/dev/null || echo "  (none)")"
 
-  # Current best result
-  best_result="$(cat "$ROOT/research/best_result.json" 2>/dev/null || echo "(no best result yet)")"
+  # Current best result (per-resolution, fallback to legacy)
+  if [[ -f "$ROOT/research/best_result_${RESOLUTION}.json" ]]; then
+    best_result="$(cat "$ROOT/research/best_result_${RESOLUTION}.json")"
+  else
+    best_result="$(cat "$ROOT/research/best_result.json" 2>/dev/null || echo "(no best result yet)")"
+  fi
 
   # Steering: compute which priority tier to target this iteration
   local steering_directive

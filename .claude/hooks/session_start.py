@@ -9,20 +9,35 @@ from pathlib import Path
 def main() -> None:
     lines = ["=== corridorkey-mlx autoresearch lab ==="]
 
-    # Current best
-    best_path = Path("research/best_result.json")
-    if best_path.exists():
-        try:
-            best = json.loads(best_path.read_text())
-            lines.append(
-                f"Best: {best.get('experiment_name', '?')} — "
-                f"{best.get('benchmark', {}).get('median_ms', '?')}ms, "
-                f"{best.get('peak_memory_mb', '?')}MB"
-            )
-        except Exception:
-            lines.append("Best: (could not read)")
+    # Current best (per-resolution)
+    best_files = sorted(Path("research").glob("best_result_*.json"))
+    if best_files:
+        for bp in best_files:
+            try:
+                best = json.loads(bp.read_text())
+                res = best.get("resolution", "?")
+                lines.append(
+                    f"Best @{res}: {best.get('experiment_name', '?')} — "
+                    f"{best.get('benchmark', {}).get('median_ms', '?')}ms, "
+                    f"{best.get('peak_memory_mb', '?')}MB"
+                )
+            except Exception:
+                lines.append(f"Best: (could not read {bp.name})")
     else:
-        lines.append("Best: no baseline yet — run first experiment")
+        # Fallback to legacy best_result.json
+        legacy = Path("research/best_result.json")
+        if legacy.exists():
+            try:
+                best = json.loads(legacy.read_text())
+                lines.append(
+                    f"Best: {best.get('experiment_name', '?')} — "
+                    f"{best.get('benchmark', {}).get('median_ms', '?')}ms, "
+                    f"{best.get('peak_memory_mb', '?')}MB"
+                )
+            except Exception:
+                lines.append("Best: (could not read)")
+        else:
+            lines.append("Best: no baseline yet — run first experiment")
 
     # Experiment count
     log_path = Path("research/experiments.jsonl")

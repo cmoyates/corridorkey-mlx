@@ -17,7 +17,14 @@ import sys
 from pathlib import Path
 
 EXPERIMENTS_LOG = Path("research/experiments.jsonl")
-BEST_RESULT_PATH = Path("research/best_result.json")
+BEST_RESULT_DIR = Path("research")
+
+
+def best_result_path(resolution: int | None = None) -> Path:
+    """Return resolution-specific best result path."""
+    if resolution:
+        return BEST_RESULT_DIR / f"best_result_{resolution}.json"
+    return BEST_RESULT_DIR / "best_result.json"
 
 # Priority search areas for suggesting next experiment
 SEARCH_AREAS = [
@@ -79,20 +86,22 @@ def main() -> None:
     with EXPERIMENTS_LOG.open("a") as f:
         f.write(json.dumps(entry) + "\n")
 
-    # If KEEP and better than current best, update best
+    # If KEEP and better than current best, update best (per-resolution)
     if verdict in ("KEEP", "WEAK_KEEP"):
-        if BEST_RESULT_PATH.exists():
-            best = json.loads(BEST_RESULT_PATH.read_text())
+        resolution = result.get("resolution")
+        best_path = best_result_path(resolution)
+        if best_path.exists():
+            best = json.loads(best_path.read_text())
             best_median = best.get("benchmark", {}).get("median_ms", float("inf"))
             cand_median = result.get("benchmark", {}).get("median_ms", float("inf"))
             if cand_median < best_median:
-                BEST_RESULT_PATH.write_text(json.dumps(result, indent=2))
-                print(f"New best result: {cand_median}ms (was {best_median}ms)")
+                best_path.write_text(json.dumps(result, indent=2))
+                print(f"New best result @{resolution}: {cand_median}ms (was {best_median}ms)")
             else:
-                print(f"Kept but not new best ({cand_median}ms >= {best_median}ms)")
+                print(f"Kept but not new best @{resolution} ({cand_median}ms >= {best_median}ms)")
         else:
-            BEST_RESULT_PATH.write_text(json.dumps(result, indent=2))
-            print(f"First result saved as baseline: {result.get('benchmark', {}).get('median_ms')}ms")
+            best_path.write_text(json.dumps(result, indent=2))
+            print(f"First result @{resolution} saved as best: {result.get('benchmark', {}).get('median_ms')}ms")
 
     # Print summary
     print(f"\n--- Experiment Summary ---")

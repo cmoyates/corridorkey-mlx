@@ -35,3 +35,4 @@ artifacts/
 # Research lab artifacts (machine-local, not committed)
 research/artifacts/
 research/best_result.json
+research/best_result_*.json

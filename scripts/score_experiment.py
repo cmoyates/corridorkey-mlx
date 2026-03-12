@@ -16,7 +16,7 @@ import json
 import sys
 from pathlib import Path
 
-BEST_RESULT_PATH = Path("research/best_result.json")
+BEST_RESULT_PATH = Path("research/best_result.json")  # legacy default; loop overrides via --baseline
 
 # Scoring weights (must sum to 1.0)
 WEIGHT_MEDIAN_LATENCY = 0.6
