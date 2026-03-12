@@ -119,10 +119,6 @@ class GreenFormer(nn.Module):
             # avoiding fp32 round-trip (cast up then back down).
             alpha_coarse = mx.sigmoid(alpha_logits_up)
             fg_coarse = mx.sigmoid(fg_logits_up)
-            # Defer fp32 cast to after sigmoid — only needed for final delta addition
-            if self._compute_dtype != mx.float32:
-                alpha_logits_up = alpha_logits_up.astype(mx.float32)
-                fg_logits_up = fg_logits_up.astype(mx.float32)
         else:
             alpha_fn = self._compiled_alpha_decoder_call or self.alpha_decoder
             fg_fn = self._compiled_fg_decoder_call or self.fg_decoder
@@ -140,11 +136,6 @@ class GreenFormer(nn.Module):
             # Alpha upsample + sigmoid on default stream (parallel with fg stream)
             alpha_logits_up = self._logit_upsampler(alpha_logits)  # (B, H, W, 1)
             alpha_coarse = mx.sigmoid(alpha_logits_up)
-
-            # Defer fp32 cast — only needed for final delta addition (lines below)
-            if self._compute_dtype != mx.float32:
-                alpha_logits_up = alpha_logits_up.astype(mx.float32)
-                fg_logits_up = fg_logits_up.astype(mx.float32)
 
         # Skip decoder→refiner materialization barrier: decoder outputs are
         # small (~8MB at 512²) so keeping them lazy lets MLX fuse sigmoid +
@@ -171,10 +162,11 @@ class GreenFormer(nn.Module):
             delta_logits = refiner_fn(rgb_r, coarse_r)
 
         if self._refiner_dtype is not None:
-            delta_logits = delta_logits.astype(mx.float32)  # (B, H, W, 4)
             del rgb_r, coarse_r
 
-        # Final predictions: additive residual in logit space, then sigmoid
+        # Final predictions: additive residual in logit space, then sigmoid.
+        # Keep addition + sigmoid in bf16 (auto-promoted if dtypes differ);
+        # bf16 has sufficient precision for sigmoid outputs quantized to uint8.
         alpha_final = mx.sigmoid(alpha_logits_up + delta_logits[:, :, :, 0:1])
         fg_final = mx.sigmoid(fg_logits_up + delta_logits[:, :, :, 1:4])
 
@@ -182,20 +174,20 @@ class GreenFormer(nn.Module):
             return {
                 "alpha_coarse": alpha_coarse.astype(mx.float32),
                 "fg_coarse": fg_coarse.astype(mx.float32),
-                "alpha_final": alpha_final,
-                "fg_final": fg_final,
+                "alpha_final": alpha_final.astype(mx.float32),
+                "fg_final": fg_final.astype(mx.float32),
             }
 
         return {
             "alpha_logits": alpha_logits.astype(mx.float32),
             "fg_logits": fg_logits.astype(mx.float32),
-            "alpha_logits_up": alpha_logits_up,
-            "fg_logits_up": fg_logits_up,
+            "alpha_logits_up": alpha_logits_up.astype(mx.float32),
+            "fg_logits_up": fg_logits_up.astype(mx.float32),
             "alpha_coarse": alpha_coarse.astype(mx.float32),
             "fg_coarse": fg_coarse.astype(mx.float32),
-            "delta_logits": delta_logits,
-            "alpha_final": alpha_final,
-            "fg_final": fg_final,
+            "delta_logits": delta_logits.astype(mx.float32),
+            "alpha_final": alpha_final.astype(mx.float32),
+            "fg_final": fg_final.astype(mx.float32),
         }
 
     def _refiner_tiled(
