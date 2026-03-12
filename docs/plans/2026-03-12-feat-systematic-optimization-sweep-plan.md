@@ -149,19 +149,16 @@ for limit_mb in [0, 512, 1024, 1536, 2048, 3072, 4096]:
 **Risk**: LOW for memory, but breaks multi-call usage
 **Time**: 1 hour
 
-### Exp 35: Edge-Aware Tile Blend Weights
+### ~~Exp 35: Edge-Aware Tile Blend Weights~~ ⏭️ ALREADY DONE
 
 **Hypothesis**: Current linear ramp blending applies to image boundaries, causing alpha darkening. Only ramp edges overlapping adjacent tiles; full weight at image boundaries.
 
-**Protocol**:
-1. Read EZ-CorridorKey `_blend_weight()` implementation
-2. Modify `src/corridorkey_mlx/inference/tiled.py` blend weight generation
-3. Visual quality check on test images with edge-adjacent subjects
+**Result**: Already implemented. `_make_blend_weights_2d()` position tuple uses `yi > 0` / `xi > 0` to detect neighbors — logically equivalent to EZ-CorridorKey's `at_top`/`at_left` boundary flags. Image boundary edges get full weight, internal overlaps get linear ramps. Test `test_corner_tile` confirms `w[0,0]==1.0` at boundary.
 
-**Files**: `inference/tiled.py`
+**Files**: `inference/tiling.py`
 **Target**: Quality fix (no speed change expected)
 **Risk**: LOW
-**Time**: 1-2 hours
+**Time**: N/A
 
 ---
 
@@ -211,34 +208,27 @@ for limit_mb in [0, 512, 1024, 1536, 2048, 3072, 4096]:
 **Risk**: MEDIUM-HIGH (complex refactor, may break mx.compile)
 **Time**: 6-8 hours
 
-### Exp 39: addmm Fused Linear Retry
+### ~~Exp 39: addmm Fused Linear Retry~~ ❌ FAILED
 
 **Hypothesis**: Exp 11 (`addmm-fused-linear-backbone`) showed 2x regression, likely wrong implementation. `mx.addmm(bias, x, W.T)` should be faster than `x @ W.T + bias`.
 
-**Protocol**:
-1. Audit exp 11 code for implementation errors (doubled dispatch suspected)
-2. Implement correctly: single `mx.addmm` call per linear layer
-3. Start with decoder linears only (fewer layers, easier to verify)
-4. Benchmark
+**Result**: REVERT — 4.3% regression (440.81ms vs 422.46ms baseline). Replaced `x @ _fc_wt + bias` with `mx.addmm(bias, x, _fc_wt)` in all 24 Hiera MLP blocks. MLX compiler already fuses contiguous matmul+add; explicit addmm adds dispatch overhead. Confirms exp 11 finding was real, not a bug.
 
-**Files**: `decoder.py` or `hiera.py`
+**Files**: `hiera.py`
 **Target**: ~2-5% per linear-heavy component
-**Risk**: LOW (exp 11 was inconclusive, not disproven)
-**Time**: 2-3 hours
+**Risk**: LOW
+**Time**: 30 min
 
-### Exp 40: Unified bf16 Safetensors Checkpoint
+### ~~Exp 40: Unified bf16 Safetensors Checkpoint~~ ❌ FAILED
 
 **Hypothesis**: Pre-converting weights to bf16 for layers that run in bf16 halves checkpoint load time and peak memory during loading.
 
-**Protocol**:
-1. Modify `convert/converter.py` to output bf16 weights for: decoder, refiner, backbone stages 1-3
-2. Modify weight loading to skip runtime dtype casts
-3. Benchmark load time + peak memory during init
+**Result**: REVERT — Negligible savings. Decoder (5.6MB) + refiner (1.2MB) are tiny vs backbone (392MB). Only 3.4MB saved (0.8% of checkpoint). Load time/peak memory unchanged. Switched load path to `mx.load` (bf16-native) as minor infra improvement.
 
-**Files**: `converter.py`, `greenformer.py` (load path)
+**Files**: `converter.py`, `corridorkey.py` (load path)
 **Target**: ~50% faster load, ~200-300MB less peak during load
-**Risk**: LOW (saves bf16 for layers already running in bf16)
-**Time**: 2-3 hours
+**Risk**: LOW
+**Time**: 45 min
 
 ---
 

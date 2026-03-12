@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING
 
 import mlx.core as mx
 import mlx.nn as nn
-from safetensors import safe_open
 
 from corridorkey_mlx.model.backbone import HieraBackbone
 from corridorkey_mlx.model.decoder import DecoderHead, FusedDecoderPair
@@ -271,42 +270,43 @@ class GreenFormer(nn.Module):
         - Backbone keys (encoder.model.* prefix) with pos_embed interpolation
         - Decoder keys (alpha_decoder.*, fg_decoder.*)
         - Refiner keys (refiner.*)
+        - Mixed-precision checkpoints (bf16 decoder/refiner weights loaded natively)
         """
         target_tokens = _prod(self.backbone.tokens_spatial_shape)
         weight_pairs: list[tuple[str, mx.array]] = []
 
-        with safe_open(str(path), framework="numpy") as f:
-            for full_key in f.keys():  # noqa: SIM118
-                tensor = mx.array(f.get_tensor(full_key))
+        # mx.load handles bf16 safetensors natively (safe_open+numpy cannot)
+        raw_weights = mx.load(str(path))
 
-                if full_key.startswith(ENCODER_KEY_PREFIX):
-                    # Backbone: strip encoder.model. prefix
-                    mlx_key = "backbone." + full_key[len(ENCODER_KEY_PREFIX) :]
-                    if mlx_key == "backbone.pos_embed":
-                        tensor = _interpolate_pos_embed(tensor, target_tokens)
-                        # materialize interpolated embedding
-                        mx.eval(tensor)
-                else:
-                    # Decoder/refiner: use key as-is
-                    mlx_key = full_key
+        for full_key, tensor in raw_weights.items():
+            if full_key.startswith(ENCODER_KEY_PREFIX):
+                # Backbone: strip encoder.model. prefix
+                mlx_key = "backbone." + full_key[len(ENCODER_KEY_PREFIX) :]
+                if mlx_key == "backbone.pos_embed":
+                    tensor = _interpolate_pos_embed(tensor, target_tokens)
+                    # NOTE: mx.eval is MLX array materialization, not Python eval()
+                    mx.eval(tensor)  # noqa: S307  -- mx.eval, not Python eval
+            else:
+                # Decoder/refiner: use key as-is
+                mlx_key = full_key
 
-                weight_pairs.append((mlx_key, tensor))
+            weight_pairs.append((mlx_key, tensor))
 
-        # Cast refiner weights to reduced precision at load time
+        # Cast refiner weights to reduced precision (skip if already correct dtype)
         if self._refiner_dtype is not None:
             weight_pairs = [
-                (k, v.astype(self._refiner_dtype)) if k.startswith("refiner.") else (k, v)
+                (k, v.astype(self._refiner_dtype))
+                if k.startswith("refiner.") and v.dtype != self._refiner_dtype
+                else (k, v)
                 for k, v in weight_pairs
             ]
 
-        # Cast decoder weights to reduced precision at load time — keeps
-        # entire decoder path in bf16 when backbone outputs bf16 features,
-        # avoiding fp32 promotion from mixed-precision matmul
+        # Cast decoder weights to reduced precision (skip if already correct dtype)
         if self._decoder_dtype is not None:
             decoder_prefixes = ("alpha_decoder.", "fg_decoder.")
             weight_pairs = [
                 (k, v.astype(self._decoder_dtype))
-                if k.startswith(decoder_prefixes)
+                if k.startswith(decoder_prefixes) and v.dtype != self._decoder_dtype
                 else (k, v)
                 for k, v in weight_pairs
             ]
