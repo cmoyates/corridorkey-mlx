@@ -16,6 +16,7 @@ from corridorkey_mlx.model.backbone import HieraBackbone
 from corridorkey_mlx.model.decoder import DecoderHead, FusedDecoderPair
 from corridorkey_mlx.model.hiera import ENCODER_KEY_PREFIX, _interpolate_pos_embed, _prod
 from corridorkey_mlx.model.refiner import CNNRefinerModule
+from corridorkey_mlx.utils.quantize import safe_quantize
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -45,9 +46,11 @@ class GreenFormer(nn.Module):
         compile_backbone: bool = True,
         compile_forward: bool = False,
         refiner_tile_size: int | None = 512,
+        quantize_backbone_stages: bool = True,
     ) -> None:
         super().__init__()
         self._compute_dtype = dtype
+        self._quantize_backbone_stages = quantize_backbone_stages
         self._fused_decode = fused_decode
         self._slim = slim
         self._stage_gc = stage_gc
@@ -286,7 +289,18 @@ class GreenFormer(nn.Module):
         self.load_weights(weight_pairs)
         self.eval()
         # materialize all parameters — mx.eval is MLX array materialization
-        mx.eval(self.parameters())  # noqa: S307  -- mx.eval, not Python eval
+        mx.eval(self.parameters())  # noqa: S307  -- mx.eval, not Python eval()
+
+        # Quantize backbone stages 1-3 (dims 224,448,896 — all divisible by 32).
+        # Stage 0 (dim=112) is skipped by safe_quantize. Int8 weights halve
+        # memory bandwidth for 22/24 blocks' Linear layers (attn qkv/proj + MLP).
+        if self._quantize_backbone_stages:
+            # stage_ends = [1, 4, 20, 23]; stages 1-3 = blocks 2..23
+            stage1_start = self.backbone.stage_ends[0] + 1  # block 2
+            for blk in self.backbone.blocks[stage1_start:]:
+                safe_quantize(blk, group_size=32, bits=8)
+            # materialize quantized parameters — mx.eval is MLX graph materialization
+            mx.eval(self.backbone.parameters())  # noqa: S307  -- mx.eval, not Python eval()
 
         # Fold BatchNorm into precomputed scale+offset (2 ops vs 5)
         # Also precomputes 2D weights for 1x1 conv addmm bypass
