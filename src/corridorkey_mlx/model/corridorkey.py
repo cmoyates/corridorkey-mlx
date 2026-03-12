@@ -285,7 +285,11 @@ class GreenFormer(nn.Module):
         self.load_weights(weight_pairs)
         self.eval()
         # materialize all parameters — mx.eval is MLX array materialization
-        mx.eval(self.parameters())  # noqa: S307
+        mx.eval(self.parameters())  # noqa: S307  -- mx.eval, not Python eval
+
+        # Fold BatchNorm into precomputed scale+offset (2 ops vs 5)
+        self.alpha_decoder.fold_bn()
+        self.fg_decoder.fold_bn()
 
         if self._compile_forward:
             # Whole-forward compilation: fuses backbone + decoders + upsample +

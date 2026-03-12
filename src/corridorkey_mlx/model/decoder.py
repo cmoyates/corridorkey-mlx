@@ -64,6 +64,32 @@ class DecoderHead(nn.Module):
         self.bn = nn.BatchNorm(embed_dim)
         self.classifier = nn.Conv2d(embed_dim, output_dim, kernel_size=1)
 
+        # Folded BN params (precomputed after weight loading)
+        self._bn_folded = False
+        self._bn_scale: mx.array | None = None
+        self._bn_offset: mx.array | None = None
+
+    def fold_bn(self) -> None:
+        """Fold BatchNorm into precomputed scale+offset for inference.
+
+        Reduces BN from 5 element-wise ops (sub, rsqrt, mul, mul, add) to 2
+        (mul, add), simplifying the compiled Metal kernel graph.
+        Must be called after weights are loaded and model is in eval mode.
+        """
+        eps = self.bn.eps
+        inv_std = mx.rsqrt(self.bn.running_var + eps)
+        self._bn_scale = self.bn.weight * inv_std
+        self._bn_offset = self.bn.bias - self.bn.running_mean * self._bn_scale
+        # materialize folded params — mx.eval is MLX array materialization
+        mx.eval(self._bn_scale, self._bn_offset)  # noqa: S307
+        self._bn_folded = True
+
+    def _apply_bn(self, x: mx.array) -> mx.array:
+        """Apply BatchNorm — folded (2 ops) or standard (5 ops)."""
+        if self._bn_folded:
+            return x * self._bn_scale + self._bn_offset
+        return self.bn(x)
+
     def __call__(self, features: list[mx.array]) -> mx.array:
         """Forward pass.
 
@@ -99,7 +125,7 @@ class DecoderHead(nn.Module):
         # Concatenate in c4, c3, c2, c1 order to match trained weight layout
         fused = mx.concatenate(projected[::-1], axis=-1)  # (B, H/4, W/4, embed_dim*4)
         fused = self.linear_fuse(fused)
-        fused = self.bn(fused)
+        fused = self._apply_bn(fused)
         fused = nn.relu(fused)
         # No dropout at inference (eval mode)
         return self.classifier(fused)
@@ -120,7 +146,7 @@ class DecoderHead(nn.Module):
         """Fuse pre-upsampled projections and classify."""
         fused = mx.concatenate(projected[::-1], axis=-1)
         fused = self.linear_fuse(fused)
-        fused = self.bn(fused)
+        fused = self._apply_bn(fused)
         fused = nn.relu(fused)
         return self.classifier(fused)
 
