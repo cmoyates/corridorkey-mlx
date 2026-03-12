@@ -23,6 +23,7 @@ ROOT="$(dirname "$(realpath "${BASH_SOURCE[0]}")")"
 ITERATIONS="${1:-10}"
 MAX_STALLS="${MAX_STALLS:-3}"
 CLAUDE_TIMEOUT="${CLAUDE_TIMEOUT:-600}"
+RESOLUTION="${RESOLUTION:-1024}"
 
 STALLS=0
 STALL_TYPE=""
@@ -31,7 +32,7 @@ LAST_ERROR=""
 ARTIFACTS_DIR="$ROOT/artifacts"
 RUNS_DIR="$ARTIFACTS_DIR/runs"
 DECISION_PATH="$ARTIFACTS_DIR/latest_decision.json"
-BASELINE_PATH="$ARTIFACTS_DIR/benchmark_baseline.json"
+BASELINE_PATH="$ARTIFACTS_DIR/benchmark_baseline_${RESOLUTION}.json"
 LOOP_LOG="$RUNS_DIR/loop-log.jsonl"
 
 # ---------------------------------------------------------------------------
@@ -122,7 +123,7 @@ if [[ ! -f "$BASELINE_PATH" ]]; then
   echo "========================================"
   if ! uv run python "$ROOT/scripts/run_research_experiment.py" \
     --experiment-name "baseline" \
-    --resolution 1024 \
+    --resolution "$RESOLUTION" \
     --output "$BASELINE_PATH"; then
     echo "Baseline capture failed (fidelity check). Cannot start loop."
     exit 1
@@ -135,6 +136,19 @@ fi
 # ---------------------------------------------------------------------------
 build_prompt() {
   local last_experiments best_result compound_index last_error_block
+  local baseline_median_ms baseline_memory_mb
+
+  # Extract baseline numbers for dynamic prompt
+  baseline_median_ms="$(python3 -c "
+import json
+with open('$BASELINE_PATH') as f:
+    print(json.load(f)['benchmark']['median_ms'])
+" 2>/dev/null || echo "?")"
+  baseline_memory_mb="$(python3 -c "
+import json
+with open('$BASELINE_PATH') as f:
+    print(json.load(f)['peak_memory_mb'])
+" 2>/dev/null || echo "?")"
 
   # Error context from previous iteration
   if [[ -n "$LAST_ERROR" ]]; then
@@ -282,8 +296,8 @@ Available notes:
 $compound_index
 
 ## KEY INSIGHT — ROOT CAUSE OF PLATEAU
-The model is MEMORY-BANDWIDTH BOUND, not compute-bound. Weight loading = 0.5ms (<1% of 120ms).
-The remaining 119ms is dominated by:
+The model is MEMORY-BANDWIDTH BOUND, not compute-bound. Baseline: ${baseline_median_ms}ms median, ${baseline_memory_mb}MB peak.
+The latency is dominated by:
 1. Dilated convolutions in refiner force im2col fallback (9x activation memory inflation)
 2. FP32 backbone activations double bandwidth vs BF16
 3. Hidden non-contiguous tensor copies from Hiera's unroll/reroll across 24 blocks
@@ -345,6 +359,7 @@ PROMPT
 echo ""
 echo "========================================"
 echo "Starting optimization loop"
+echo "  Resolution: ${RESOLUTION}x${RESOLUTION}"
 echo "  Iterations: $ITERATIONS"
 echo "  Max stalls: $MAX_STALLS"
 echo "  Timeout:    ${CLAUDE_TIMEOUT}s"
@@ -447,7 +462,7 @@ for ((i=1; i<=ITERATIONS; i++)); do
   set +o pipefail
   uv run python "$ROOT/scripts/run_research_experiment.py" \
     --experiment-name "$EXP_NAME" \
-    --resolution 1024 \
+    --resolution "$RESOLUTION" \
     --output "$RESULT_FILE" 2>&1 | tee "$GATE3_LOG"
   GATE3_EXIT="${PIPESTATUS[0]}"
   set -o pipefail
@@ -488,7 +503,8 @@ $(tail -30 "$GATE3_LOG")"
   # --- Gate 4: Score and decide ---
   echo "[gate] Scoring experiment..."
   SCORE_OUTPUT="$(uv run python "$ROOT/scripts/score_experiment.py" \
-    --result "$RESULT_FILE" 2>&1)" || {
+    --result "$RESULT_FILE" \
+    --baseline "$BASELINE_PATH" 2>&1)" || {
     echo "[FAIL] Scoring failed. Reverting."
     LAST_ERROR="scoring failed for '$EXP_NAME': $SCORE_OUTPUT"
     revert_changes
