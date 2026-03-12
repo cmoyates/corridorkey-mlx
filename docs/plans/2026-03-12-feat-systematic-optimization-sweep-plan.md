@@ -178,9 +178,11 @@ for limit_mb in [0, 512, 1024, 1536, 2048, 3072, 4096]:
 **Risk**: MEDIUM (refiner blending at tile boundaries needs care)
 **Time**: 4-6 hours
 
-### Exp 37: GEMM Tile Shape Alignment (Weight Pre-Packing)
+### ~~Exp 37: GEMM Tile Shape Alignment (Weight Pre-Packing)~~ ❌ FAILED
 
 **Hypothesis**: Metal GEMM dispatch selects between `steel_gemm_fused_nt` and `steel_gemm_splitk_nt` based on matrix dims. Padding weight matrices to multiples of 32/64 may trigger faster dispatch.
+
+**Result**: REVERT — 1.9% latency regression (430.58ms vs 422.46ms). Padded stage 0 K-dim 112→128 for 6 matmuls (QKV+proj+fc1 in blocks 0-1). Runtime `mx.pad` overhead negates any GEMM tile benefit. Stage 0 is only 2 of 24 blocks — too small to offset padding cost. +140MB peak memory from padded weight copies.
 
 **Protocol**:
 1. Profile current GEMM kernel selections via Metal trace
