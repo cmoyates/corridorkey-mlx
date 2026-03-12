@@ -30,7 +30,7 @@ Execute every untried optimization idea identified across 28 experiments, 12 com
 
 ## Phase 1: Zero-Risk Sweeps (< 1 hour total, no code changes)
 
-### Exp 29: MLX_MAX_MB_PER_BUFFER + MLX_MAX_OPS_PER_BUFFER Sweep
+### ~~Exp 29: MLX_MAX_MB_PER_BUFFER + MLX_MAX_OPS_PER_BUFFER Sweep~~ ✅ DONE
 
 **Hypothesis**: Default buffer limits cause premature command buffer splits, adding dispatch overhead.
 
