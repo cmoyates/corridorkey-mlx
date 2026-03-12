@@ -64,11 +64,15 @@ class DecoderHead(nn.Module):
         self.bn = nn.BatchNorm(embed_dim)
         self.classifier = nn.Conv2d(embed_dim, output_dim, kernel_size=1)
 
-        # Folded BN params (precomputed after weight loading)
+        # Folded BN params (precomputed by fold_bn after weight loading).
+        # _fuse_weight_2d and _classifier_weight_2d are initialized lazily on
+        # first access so that __call__ works before fold_bn().
         self._bn_folded = False
         self._bn_scale: mx.array | None = None
         self._bn_offset: mx.array | None = None
         self._fuse_weight_chunks: list[mx.array] = []
+        self._fuse_weight_2d: mx.array | None = None
+        self._classifier_weight_2d: mx.array | None = None
 
     def fold_bn(self) -> None:
         """Fold BatchNorm into precomputed scale+offset for inference.
@@ -156,13 +160,19 @@ class DecoderHead(nn.Module):
             fused = fused + projected[2] @ self._fuse_weight_chunks[1].T
             fused = fused + projected[1] @ self._fuse_weight_chunks[2].T
             fused = fused + projected[0] @ self._fuse_weight_chunks[3].T
-        else:
+        elif self._fuse_weight_2d is not None:
             fused = mx.concatenate(projected[::-1], axis=-1)
             fused = fused @ self._fuse_weight_2d.T
+        else:
+            # Pre-fold_bn: use original 1x1 conv layer
+            fused = mx.concatenate(projected[::-1], axis=-1)
+            fused = self.linear_fuse(fused)
         fused = self._apply_bn(fused)
         fused = nn.relu(fused)
-        # 1x1 conv as addmm (fused bias+matmul); classifier has bias
-        return mx.addmm(self.classifier.bias, fused, self._classifier_weight_2d.T)
+        # 1x1 conv as addmm or original conv
+        if self._classifier_weight_2d is not None:
+            return mx.addmm(self.classifier.bias, fused, self._classifier_weight_2d.T)
+        return self.classifier(fused)
 
     def _project_features(self, features: list[mx.array]) -> list[mx.array]:
         """Project features without upsampling or fusion."""
@@ -183,12 +193,17 @@ class DecoderHead(nn.Module):
             fused = fused + projected[2] @ self._fuse_weight_chunks[1].T
             fused = fused + projected[1] @ self._fuse_weight_chunks[2].T
             fused = fused + projected[0] @ self._fuse_weight_chunks[3].T
-        else:
+        elif self._fuse_weight_2d is not None:
             fused = mx.concatenate(projected[::-1], axis=-1)
             fused = fused @ self._fuse_weight_2d.T
+        else:
+            fused = mx.concatenate(projected[::-1], axis=-1)
+            fused = self.linear_fuse(fused)
         fused = self._apply_bn(fused)
         fused = nn.relu(fused)
-        return mx.addmm(self.classifier.bias, fused, self._classifier_weight_2d.T)
+        if self._classifier_weight_2d is not None:
+            return mx.addmm(self.classifier.bias, fused, self._classifier_weight_2d.T)
+        return self.classifier(fused)
 
 
 class FusedDecoderPair(nn.Module):

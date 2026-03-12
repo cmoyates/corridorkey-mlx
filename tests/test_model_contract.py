@@ -54,6 +54,9 @@ EXPECTED_SHAPES: dict[str, tuple[int, ...]] = {
 def model_output() -> dict[str, mx.array]:
     """Forward pass with random weights, materialized once."""
     model = GreenFormer(img_size=IMG_SIZE)
+    model.alpha_decoder.fold_bn()
+    model.fg_decoder.fold_bn()
+    model.refiner.prepare_inference()
     x = mx.random.normal((1, IMG_SIZE, IMG_SIZE, 4))
     out = model(x)
     # mx.eval is MLX array materialization, not Python eval()

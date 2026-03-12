@@ -17,8 +17,12 @@ OUTPUT_KEYS = ("alpha_final", "fg_final", "alpha_coarse", "fg_coarse", "delta_lo
 def model() -> GreenFormer:
     model = GreenFormer(img_size=IMG_SIZE)
     model.eval()
-    # NOTE: mx.eval is MLX array materialization, not Python eval()
+    # NOTE: mx.eval is MLX array materialization, not builtins eval()
     mx.eval(model.parameters())  # noqa: S307
+    # fold_bn precomputes fused weights required by decoder forward pass
+    model.alpha_decoder.fold_bn()
+    model.fg_decoder.fold_bn()
+    model.refiner.prepare_inference()
     return model
 
 
