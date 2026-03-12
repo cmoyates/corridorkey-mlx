@@ -29,6 +29,7 @@ DEFAULT_IMG_SIZE = 512
 
 
 WIRED_LIMIT_BYTES = 512 * 1024 * 1024  # 512 MiB — covers model weights + working set
+CACHE_LIMIT_BYTES = 1536 * 1024 * 1024  # 1.5 GiB — forces buffer reuse, reduces peak memory
 
 
 def load_model(
@@ -43,6 +44,7 @@ def load_model(
     stage_gc: bool = True,
     refiner_dtype: mx.Dtype | None = mx.float16,
     wired_limit_bytes: int | None = WIRED_LIMIT_BYTES,
+    cache_limit_bytes: int | None = CACHE_LIMIT_BYTES,
 ) -> GreenFormer:
     """Build GreenFormer and load weights from safetensors checkpoint.
 
@@ -67,9 +69,14 @@ def load_model(
         wired_limit_bytes: Pin this many bytes as wired/resident Metal memory.
             Prevents OS paging and reduces p95 latency variance.
             None = no wiring (MLX default). 512 MiB covers model weights.
+        cache_limit_bytes: Metal buffer cache size limit. Forces buffer reuse
+            when cache exceeds this, reducing peak memory. None = unlimited
+            (MLX default). 1.5 GiB balances reuse overhead vs peak memory.
     """
     if wired_limit_bytes is not None:
         mx.set_wired_limit(wired_limit_bytes)
+    if cache_limit_bytes is not None:
+        mx.set_cache_limit(cache_limit_bytes)
 
     model = GreenFormer(
         img_size=img_size,
