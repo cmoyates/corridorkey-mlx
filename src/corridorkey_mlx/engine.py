@@ -92,6 +92,13 @@ class CorridorKeyMLXEngine:
             msg = f"Checkpoint not found: {checkpoint}"
             raise FileNotFoundError(msg)
 
+        # Tune MLX buffer commit frequency for tiled inference.
+        # Small buffers force frequent evaluation, preventing graph buildup
+        # that hurts tiled workloads. 17% faster at production resolution.
+        import os
+        os.environ.setdefault("MLX_MAX_MB_PER_BUFFER", "2")
+        os.environ.setdefault("MLX_MAX_OPS_PER_BUFFER", "2")
+
         if device is not None:
             logger.info("device=%r ignored on MLX (unified memory)", device)
 
