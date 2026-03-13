@@ -35,15 +35,19 @@ fine on static frames). Separate alpha/fg thresholds — alpha is 2-5x more sens
 
 | Check | Threshold | Source |
 |-------|-----------|--------|
-| alpha PSNR vs full-pipeline | > 30 dB | TBD |
-| fg PSNR vs full-pipeline | > 28 dB | TBD |
-| alpha SSIM vs full-pipeline | > 0.95 | TBD |
-| dtSSD (temporal coherence) | < 2.0 | TBD |
+| alpha PSNR vs full-pipeline | > 35 dB | bench_video.py |
+| fg PSNR vs full-pipeline | > 33 dB | bench_video.py |
+| alpha SSIM vs full-pipeline | > 0.97 | bench_video.py |
+| dtSSD (temporal coherence) | < 1.5 | bench_video.py |
 | Output NaN/Inf check | none | smoke_2048.py |
 | Alpha not all-zero or all-one | varies | smoke_2048.py |
 
-**Note:** Tier 2 thresholds are provisional — deep research in progress to calibrate
-against production VFX standards. PSNR/SSIM measured per-frame; dtSSD across frame pairs.
+**Calibration notes** (from deep research):
+- PSNR > 35dB and SSIM > 0.95 are *baseline* indicators (not production grade)
+- SOTA video matting models achieve dtSSD ~1.0-1.5 on HD datasets
+- Alpha is 2-5x more sensitive than foreground — stricter alpha thresholds
+- Metrics should be evaluated on semi-transparent boundary regions (not just solid core)
+- PSNR/SSIM measured per-frame; dtSSD across consecutive frame pairs
 
 ## Dataset / fixture expectations
 

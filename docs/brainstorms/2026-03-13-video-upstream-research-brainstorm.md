@@ -29,6 +29,46 @@
 - **Run-Length Tokenization** (NeurIPS 2024): 35% gain, 0.1% accuracy drop — complex with Hiera's windowed attention
 - **Partial stem decomposition**: separate RGB/hint encoding paths — speculative, needs investigation
 
+### Deep research findings (2026-03-13)
+
+#### Partial feature reuse — concrete strategy for 4ch
+The deep research confirms a viable approach for our 4ch blocker:
+- Run Stages 1-2 every frame with fresh RGB + alpha hint (captures boundary + hint updates)
+- Cache + optically warp Stages 3-4 features (semantically stable, temporally redundant)
+- SegFormer decoder naturally fuses: fresh spatial (S1-S2) + warped semantic (S3-S4)
+- **Gate mechanism**: cosine similarity on Stage 2 output current vs cached — if high, skip S3-S4
+- This is NOT the same as naive backbone skip — hint info re-injected through early stages
+
+#### Hiera layer temporal stability (confirmed)
+- **Stages 1-2**: high-frequency spatial extractors, hint-sensitive, temporally volatile — MUST recompute
+- **Stages 3-4**: low-frequency semantic encoders, robust to translations, temporally stable — safe to cache/warp
+
+#### Mixed-precision PTQ numbers (PTQ4VM paper)
+| Method | Precision | MSE | Memory | Speedup |
+|--------|-----------|-----|--------|---------|
+| FP16 baseline | W16A16 | 1.60 | 1.0x | 1.0x |
+| SmoothQuant | W8A8 | 1.97 | 2.0x | ~1.5x |
+| PTQ4VM optimized | W8A8 | 1.77 | 2.0x | ~1.6x |
+| PTQ4VM aggressive | W4A8 | 2.51 | 3.5x | ~2.2x |
+
+Recommendation: W8A8 only on Stages 3-4 global attention, keep S1-S2 + decoder + refiner at FP16.
+
+#### RLT implementation for Hiera
+- Treat pruned static tokens like MAE masked tokens (Hiera robust from MAE pretraining)
+- Scatter-gather at encoder-decoder interface to reconstruct dense 2D maps for SegFormer
+- This is more feasible than initially thought due to Hiera's MAE heritage
+
+#### Apple Silicon specifics
+- `VNGenerateOpticalFlow` runs on ANE — zero GPU cost, doesn't compete with Hiera inference
+- Content-based prefix caching: hash static regions, bypass vision encoding entirely
+- Thermal mitigation: micro-yields (fractional ms sleeps) between frame dispatches
+
+#### Error threshold calibration
+- PSNR > 35dB and SSIM > 0.95 are *baseline* (not production grade)
+- SOTA video matting: dtSSD ~1.0-1.5 on HD datasets
+- Alpha metrics should evaluate semi-transparent boundary regions separately from solid core
+- Updated benchmark_spec.md: alpha PSNR > 35dB, fg PSNR > 33dB, SSIM > 0.97, dtSSD < 1.5
+
 ## Key Decisions
 
 ### 1. Two-tier fidelity threshold system — ADOPTED
@@ -63,19 +103,14 @@ Speculative: if Hiera's stem conv (4ch→112) can be decomposed to separate RGB 
 | V4 | Run-Length Tokenization | +35-40% backbone | Plan later |
 | V5 | Partial stem decomposition | Enables feature reuse | Plan later |
 
-## Deep Research (Running)
+## Deep Research — COMPLETE
 
-User is running a deep research pass covering:
-- Feature warping with guidance channels
-- Decomposed temporal strategies (which Hiera layers are temporally stable?)
-- Perceptual error metrics for production video matting
-- Apple Silicon / MLX async patterns
-- RLT implementation details for windowed attention
-- Mixed-precision quantization for video
+Full doc: `research/compound/2026-03-13-deep-research-video-matting-optimization.md`
 
 ## Open Questions
 
 - EMA blending: output-space or feature-space? Feature-space theoretically better but adds memory
 - Async pipeline: does `mx.async_eval` actually overlap with CPU preprocessing on unified memory?
-- Two-tier thresholds: what specific PSNR/SSIM/dtSSD values to gate on? (deep research should inform)
+- Partial feature reuse: how much of Hiera's compute is in S1-S2 vs S3-S4? (determines max speedup from caching S3-S4)
+- `VNGenerateOpticalFlow` latency on M-series @1024 via PyObjC? (needed for partial reuse cost model)
 - Partial stem decomposition: is the 4ch→112 stem conv separable in practice?
