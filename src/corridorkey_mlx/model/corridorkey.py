@@ -430,6 +430,8 @@ class GreenFormer(nn.Module):
 
         # Frozen GroupNorm: collect full-image stats, then freeze for tiled pass
         if self._refiner_frozen_gn:
+            # Stats collection uses same dtype as tiles; FrozenGroupNorm
+            # internally upcasts to fp32 for variance computation
             self.refiner.collect_groupnorm_stats(rgb, coarse)
             self.refiner.freeze_groupnorm_stats()
             # Bypass compiled refiner — compiled graph doesn't see frozen stats

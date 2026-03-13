@@ -62,12 +62,17 @@ class FrozenGroupNorm(nn.Module):
         if self._frozen_stats is not None:
             mean, var = self._frozen_stats
         else:
-            mean = x.mean(axis=-1, keepdims=True)
-            var = x.var(axis=-1, keepdims=True)
+            # Compute stats in fp32 for numerical stability — at full 2048x2048
+            # resolution, float16 variance overflows (33M elements per group)
+            x_f32 = x.astype(mx.float32)
+            mean = x_f32.mean(axis=-1, keepdims=True)
+            var = x_f32.var(axis=-1, keepdims=True)
             if self._collecting:
                 self._collected_stats = (mean, var)
 
-        x = (x - mean) * mx.rsqrt(var + self.eps)
+        # Normalize in input dtype to preserve activation precision
+        input_dtype = x.dtype
+        x = (x - mean.astype(input_dtype)) * mx.rsqrt(var.astype(input_dtype) + self.eps)
 
         x = x.reshape(batch, self.num_groups, -1, group_size)
         x = x.transpose(0, 2, 1, 3).reshape(batch, *rest, dims)
