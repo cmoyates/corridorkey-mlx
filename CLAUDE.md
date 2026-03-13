@@ -83,13 +83,20 @@ uv run ty check              # type check
 5. Parity check against golden reference required for every experiment
 6. All results go to structured JSON, not free-form logs
 
+### Experiment tracking
+- Experiments are tracked as GitHub issues on `cmoyates/corridorkey-mlx`
+- Before starting an experiment, check issues for existing context and related work
+- New experiment ideas → create a GitHub issue with hypothesis, approach, and expected impact
+- After completing an experiment → update the issue with results and close if resolved
+- Cross-reference related issues (e.g., blockers, dependencies)
+
 ### Experiment loop
 1. Plan: hypothesis + target files + benchmark commands + rollback criteria
 2. Implement: minimal change, one variable at a time
 3. Benchmark: `uv run python scripts/run_research_experiment.py`
 4. Score: `uv run python scripts/score_experiment.py`
 5. Decide: keep / revert based on scoring output
-6. Record: append to `research/experiments.jsonl` + write compound note
+6. Record: append to `research/experiments.jsonl` + write compound note + update GitHub issue
 
 ### Quantization
 - NEVER use `nn.quantize(block, ...)` directly — Hiera stage 0 has dim=112, not divisible by 32, and will crash

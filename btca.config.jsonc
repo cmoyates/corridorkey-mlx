@@ -42,6 +42,13 @@
       "url": "https://github.com/edenaion/EZ-CorridorKey",
       "branch": "main",
       "specialNotes": "EZ-CorridorKey — simplified CorridorKey implementation"
+    },
+    {
+      "type": "git",
+      "name": "corridorKeyRaiden",
+      "url": "https://github.com/Raiden129/CorridorKey_Test",
+      "branch": "main",
+      "specialNotes": "Raiden129's CorridorKey test fork"
     }
   ],
   "model": "gemini-3-flash-preview",
