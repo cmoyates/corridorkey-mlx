@@ -45,7 +45,7 @@ class GreenFormer(nn.Module):
         compile_backbone: bool = True,
         compile_forward: bool = False,
         refiner_tile_size: int | None = 1024,
-        quantize_backbone_stages: bool = True,
+        quantize_backbone_stages: bool = False,
         backbone_bf16_stages123: bool = False,
         decoder_dtype: mx.Dtype | None = mx.bfloat16,
         refiner_skip_confidence: float | None = None,
