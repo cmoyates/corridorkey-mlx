@@ -27,26 +27,50 @@ The ~43ms gap = decode overhead (frame read + resize). Async pipeline should rec
    - V3: Adaptive refiner tile skip — planned
    - V4+: RLT, partial feature reuse — plan later
 
+## Completed
+
+### Tier 2 metrics — DONE
+- [x] PSNR, SSIM (windowed Wang 2004), dtSSD added to `bench_video.py`
+- [x] Pure numpy implementation, no new deps
+- [x] Reports Tier 1 + Tier 2 pass/fail against benchmark_spec thresholds
+- [x] Runs for all modes including V0 baseline (establishes reference values)
+
+### V1: Temporal EMA blending — DONE (fails fidelity gate)
+- [x] Output-space EMA in `VideoProcessor._postprocess_frame()`
+- [x] CLI: `--ema-alpha 0.7`, `--ema-sweep 0.6 0.7 0.8`
+- **Result: ALL α values fail fidelity on motion video.**
+
+| α | alpha PSNR | SSIM | dtSSD | Tier 1 | Tier 2 | Verdict |
+|-----|-----------|------|-------|--------|--------|---------|
+| 0.6 | 21.7dB | 0.924 | 4.04 | FAIL | FAIL | reject |
+| 0.7 | 24.3dB | 0.941 | 3.13 | FAIL | FAIL | reject |
+| 0.8 | 27.9dB | 0.953 | 2.15 | FAIL | FAIL | reject |
+| 0.9 | 34.0dB | 0.966 | 1.10 | FAIL | FAIL | reject |
+| 0.95| 40.2dB | 0.972 | 0.55 | FAIL | PASS | reject |
+
+- α=0.95 passes Tier 2 but fails Tier 1 (max_abs=0.059). Barely useful — 5% blending.
+- Output-space EMA is fundamentally limited for motion video — introduces lag
+- **Next step if pursuing: feature-space EMA or motion-adaptive α**
+
+### V2: Async CPU-GPU pipeline — DONE (KEEP)
+- [x] `mx.async_eval` + ThreadPoolExecutor decode-ahead
+- [x] CLI: `--async-decode`
+- **Result: 7% wall-clock improvement, zero fidelity impact**
+
+| Mode | Wall-clock | FPS | Fidelity |
+|------|-----------|-----|----------|
+| V0 sync | 21.31s | 1.74 | PASS (perfect) |
+| V2 async | 19.83s | 1.87 | PASS (perfect) |
+
+- Decode overlap partially hidden (~1.5s savings over 37 frames)
+- Less than expected 43ms/frame — likely because Apple Silicon unified memory
+  means CPU decode and GPU inference compete for memory bandwidth
+- Still a clear win with zero quality tradeoff
+
 ## What To Do Next
 
-### V1: Temporal EMA blending
-- Add EMA smoothing to `VideoProcessor._process_loop()`
-- Blend on output-space alpha/fg: `out_t = α * current + (1-α) * prev` where α ∈ [0.6, 0.8]
-- Gate: ONLY proceed if zero fidelity degradation on static frames (Tier 2 metrics)
-- Feature-space EMA is theoretically better but adds memory — try output-space first
-- Measure: flicker reduction (dtSSD improvement), verify no lag on fast motion
-
-### V2: Async CPU-GPU pipeline
-- Overlap frame N+1 decode with frame N GPU inference
-- Use `mx.async_eval` + double-buffered frame loading
-- The 43ms decode overhead should be fully hidden
-- No quality impact — pure scheduling optimization
-
-### V1 + V2 need Tier 2 metric implementation
-- `bench_video.py` needs PSNR, SSIM, dtSSD computation
-- PSNR/SSIM: per-frame vs V0 reference
-- dtSSD: temporal derivative comparison across frame pairs
-- Partition metrics: solid core vs semi-transparent boundary (stretch goal)
+### V3: Adaptive refiner tile skip — planned
+### V4+: RLT, partial feature reuse — plan later
 
 ## Key Research Finding: Partial Feature Reuse (future)
 
@@ -67,9 +91,9 @@ Deep research confirmed a viable strategy for our 4ch blocker:
 - Benchmark spec: `research/benchmark_spec.md`
 - V0 baseline artifact: `research/artifacts/video_baseline.json`
 
-## Open Questions
+## Open Questions (answered)
 
-- EMA α parameter: output-space or feature-space first?
-- `mx.async_eval` — does it actually overlap with CPU on unified memory?
+- ~~EMA α parameter: output-space or feature-space first?~~ → Output-space tried, fails fidelity. Feature-space or motion-adaptive α needed.
+- ~~`mx.async_eval` — does it actually overlap with CPU on unified memory?~~ → Partially. 7% wall-clock improvement (not full 43ms overlap). Unified memory bandwidth contention likely.
 - Hiera S1-S2 vs S3-S4 compute split? (determines max speedup from partial reuse)
 - `VNGenerateOpticalFlow` latency @1024 via PyObjC?
