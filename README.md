@@ -254,7 +254,7 @@ from corridorkey_mlx.inference.tiling import tiled_inference
 
 model = load_model("checkpoints/corridorkey_mlx.safetensors", img_size=512)
 x = preprocess(rgb, alpha_hint)  # full-resolution (1, H, W, 4)
-result = tiled_inference(model, x, tile_size=512, overlap=64)
+result = tiled_inference(model, x, tile_size=512, overlap=128)
 ```
 
 ### Recommended settings for Apple Silicon
@@ -264,7 +264,7 @@ result = tiled_inference(model, x, tile_size=512, overlap=64)
 | `img_size` | 512 | Good speed/quality balance |
 | `compile` | True | ~1.5–2x faster after warmup |
 | `tile_size` | 512 | Match `img_size` for tiling |
-| `overlap` | 64 | Smooth blending at tile boundaries |
+| `overlap` | 128 | 2x safety margin over 65px receptive field |
 
 ### Comparing against PyTorch reference
 

@@ -11,9 +11,57 @@ from __future__ import annotations
 import mlx.core as mx
 import mlx.nn as nn
 
+from corridorkey_mlx.utils.metal_groupnorm import metal_groupnorm
+
 REFINER_CHANNELS = 64
 REFINER_GROUPS = 8
 REFINER_SCALE = 10.0
+
+
+class FrozenGroupNorm(nn.Module):
+    """GroupNorm with frozen-stats support for tiled inference.
+
+    Three modes:
+    - Normal: custom Metal kernel (no transposes, ~67% faster than nn.GroupNorm)
+    - Collecting: computes mean/var manually, saves stats, returns normal output
+    - Frozen: uses pre-collected stats instead of computing from input
+    """
+
+    def __init__(self, num_groups: int, dims: int) -> None:
+        super().__init__()
+        self.num_groups = num_groups
+        self.dims = dims
+        self.eps = 1e-5
+        self.weight = mx.ones((dims,))
+        self.bias = mx.zeros((dims,))
+        self._frozen_stats: tuple[mx.array, mx.array] | None = None
+        self._collecting = False
+        self._collected_stats: tuple[mx.array, mx.array] | None = None
+
+    def __call__(self, x: mx.array) -> mx.array:
+        if self._frozen_stats is not None:
+            # Frozen path — Metal kernel with precomputed stats (no transposes)
+            return metal_groupnorm(x, self.weight, self.bias, frozen_stats=self._frozen_stats)
+        if self._collecting:
+            return self._collecting_forward(x)
+        # Normal path — Metal kernel computes its own stats
+        return metal_groupnorm(x, self.weight, self.bias)
+
+    def _collecting_forward(self, x: mx.array) -> mx.array:
+        """Collecting path — compute mean/var, save stats, return normal output."""
+        batch, *rest, dims = x.shape
+        group_size = dims // self.num_groups
+        x_grouped = x.reshape(batch, -1, self.num_groups, group_size)
+        x_grouped = x_grouped.transpose(0, 2, 1, 3).reshape(batch, self.num_groups, -1)
+
+        # Compute stats in fp32 for numerical stability
+        x_f32 = x_grouped.astype(mx.float32)
+        mean = x_f32.mean(axis=-1, keepdims=True)
+        var = x_f32.var(axis=-1, keepdims=True)
+        self._collected_stats = (mean, var)
+
+        # Use Metal kernel for the actual normalization (fast path)
+        return metal_groupnorm(x, self.weight, self.bias)
 
 
 class RefinerBlock(nn.Module):
@@ -28,7 +76,7 @@ class RefinerBlock(nn.Module):
             padding=dilation,
             dilation=dilation,
         )
-        self.gn1 = nn.GroupNorm(REFINER_GROUPS, channels, pytorch_compatible=True)
+        self.gn1 = FrozenGroupNorm(REFINER_GROUPS, channels)
         self.conv2 = nn.Conv2d(
             channels,
             channels,
@@ -36,7 +84,7 @@ class RefinerBlock(nn.Module):
             padding=dilation,
             dilation=dilation,
         )
-        self.gn2 = nn.GroupNorm(REFINER_GROUPS, channels, pytorch_compatible=True)
+        self.gn2 = FrozenGroupNorm(REFINER_GROUPS, channels)
 
     def __call__(self, x: mx.array) -> mx.array:
         residual = x
@@ -58,7 +106,7 @@ class CNNRefinerModule(nn.Module):
         self.stem_conv = nn.Conv2d(
             refiner_input_channels, REFINER_CHANNELS, kernel_size=3, padding=1
         )
-        self.stem_gn = nn.GroupNorm(REFINER_GROUPS, REFINER_CHANNELS, pytorch_compatible=True)
+        self.stem_gn = FrozenGroupNorm(REFINER_GROUPS, REFINER_CHANNELS)
 
         self.res1 = RefinerBlock(REFINER_CHANNELS, dilation=1)
         self.res2 = RefinerBlock(REFINER_CHANNELS, dilation=2)
@@ -67,6 +115,76 @@ class CNNRefinerModule(nn.Module):
 
         refiner_output_channels = 4  # delta for alpha (1) + delta for fg (3)
         self.final = nn.Conv2d(REFINER_CHANNELS, refiner_output_channels, kernel_size=1)
+        # Precomputed 2D weight for 1x1 conv bypass (set in prepare_inference)
+        self._final_weight_2d: mx.array | None = None
+
+    def _all_groupnorms(self) -> list[FrozenGroupNorm]:
+        """Return all 9 FrozenGroupNorm instances in forward order."""
+        return [
+            self.stem_gn,
+            self.res1.gn1,
+            self.res1.gn2,
+            self.res2.gn1,
+            self.res2.gn2,
+            self.res3.gn1,
+            self.res3.gn2,
+            self.res4.gn1,
+            self.res4.gn2,
+        ]
+
+    def collect_groupnorm_stats(self, rgb: mx.array, coarse_pred: mx.array) -> None:
+        """Full-image forward to collect GroupNorm statistics.
+
+        Block-level mx.eval bounds peak memory to ~6GB per conv im2col.
+        """
+        for gn in self._all_groupnorms():
+            gn._collecting = True
+            gn._collected_stats = None
+
+        x = mx.concatenate([rgb, coarse_pred], axis=-1)
+        x = nn.relu(self.stem_gn(self.stem_conv(x)))
+        # mx.eval: MLX array materialization (not Python eval)
+        mx.eval(x)  # noqa: S307
+        x = self.res1(x)
+        mx.eval(x)  # noqa: S307
+        x = self.res2(x)
+        mx.eval(x)  # noqa: S307
+        x = self.res3(x)
+        mx.eval(x)  # noqa: S307
+        x = self.res4(x)
+        mx.eval(x)  # noqa: S307
+        del x  # discard output — only stats matter
+
+        # Materialize collected stats
+        all_arrays: list[mx.array] = []
+        for gn in self._all_groupnorms():
+            assert gn._collected_stats is not None
+            all_arrays.extend(gn._collected_stats)
+            gn._collecting = False
+        # mx.eval: MLX array materialization (not Python eval)
+        mx.eval(*all_arrays)  # noqa: S307
+
+    def freeze_groupnorm_stats(self) -> None:
+        """Copy collected stats to frozen stats on each GroupNorm."""
+        for gn in self._all_groupnorms():
+            assert gn._collected_stats is not None
+            gn._frozen_stats = gn._collected_stats
+
+    def unfreeze_groupnorm_stats(self) -> None:
+        """Clear frozen and collected stats on each GroupNorm."""
+        for gn in self._all_groupnorms():
+            gn._frozen_stats = None
+            gn._collected_stats = None
+
+    def prepare_inference(self) -> None:
+        """Precompute 2D weight for 1x1 final conv to bypass mx.conv2d dispatch.
+
+        Uses mx.addmm for fused bias+matmul. Call after weights are loaded.
+        """
+        c_out, _, _, c_in = self.final.weight.shape
+        self._final_weight_2d = self.final.weight.reshape(c_out, c_in)
+        # materialize reshaped weight — mx.eval is MLX array materialization
+        mx.eval(self._final_weight_2d)  # noqa: S307
 
     def __call__(self, rgb: mx.array, coarse_pred: mx.array) -> mx.array:
         """Forward pass.
@@ -84,4 +202,7 @@ class CNNRefinerModule(nn.Module):
         x = self.res2(x)
         x = self.res3(x)
         x = self.res4(x)
+        # 1x1 conv as addmm (fused bias+matmul, bypass conv2d dispatch)
+        if self._final_weight_2d is not None:
+            return mx.addmm(self.final.bias, x, self._final_weight_2d.T) * REFINER_SCALE
         return self.final(x) * REFINER_SCALE

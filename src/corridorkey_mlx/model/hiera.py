@@ -232,7 +232,29 @@ class HieraMLP(nn.Module):
         self.fc1 = nn.Linear(dim, hidden)
         self.fc2 = nn.Linear(hidden, dim)
 
+        # Pre-transposed weight caches — populated by prepare_transposed_weights()
+        self._fc1_wt: mx.array | None = None
+        self._fc2_wt: mx.array | None = None
+
+    def prepare_transposed_weights(self) -> None:
+        """Pre-transpose fc1/fc2 weights to [in, out] layout.
+
+        nn.Linear stores weight as [out, in] and computes x @ W.T, creating
+        a non-contiguous transposed view each call. Pre-transposing materializes
+        a contiguous [in, out] array so the matmul reads contiguous memory.
+        Called after weights are loaded.
+        """
+        self._fc1_wt = mx.contiguous(self.fc1.weight.T)
+        self._fc2_wt = mx.contiguous(self.fc2.weight.T)
+        # materialize pre-transposed weights — mx.eval is MLX array materialization
+        mx.eval(self._fc1_wt, self._fc2_wt)  # noqa: S307  -- mx.eval, not Python eval
+
     def __call__(self, x: mx.array) -> mx.array:
+        if self._fc1_wt is not None:
+            x = x @ self._fc1_wt + self.fc1.bias
+            x = nn.gelu(x)
+            x = x @ self._fc2_wt + self.fc2.bias
+            return x
         return self.fc2(nn.gelu(self.fc1(x)))
 
 
@@ -266,6 +288,55 @@ class MaskUnitAttention(nn.Module):
         self.qkv = nn.Linear(dim, 3 * dim_out)
         self.proj = nn.Linear(dim_out, dim_out)
 
+        # Pre-split QKV weight/bias caches — populated by prepare_split_qkv()
+        self._q_weight: mx.array | None = None
+        self._k_weight: mx.array | None = None
+        self._v_weight: mx.array | None = None
+        self._q_bias: mx.array | None = None
+        self._k_bias: mx.array | None = None
+        self._v_bias: mx.array | None = None
+
+    def prepare_split_qkv(self) -> None:
+        """Pre-split QKV weights into contiguous Q, K, V arrays.
+
+        Eliminates non-contiguous slices from mx.split(qkv, 3, axis=-1)
+        which force implicit copies on subsequent reshapes. Each pre-split
+        weight is contiguous, so x @ W.T outputs are natively contiguous.
+        Must be called after weights are loaded.
+        """
+        w = self.qkv.weight  # [3*dim_out, dim]
+        d = self.dim_out
+        # Slice along first dim of row-major array — each slice is contiguous
+        self._q_weight = w[:d]
+        self._k_weight = w[d : 2 * d]
+        self._v_weight = w[2 * d :]
+        if "bias" in self.qkv:
+            b = self.qkv.bias  # [3*dim_out]
+            self._q_bias = b[:d]
+            self._k_bias = b[d : 2 * d]
+            self._v_bias = b[2 * d :]
+        # Materialize pre-split weights — mx.eval is MLX graph evaluation
+        mx.eval(  # noqa: S307
+            self._q_weight, self._k_weight, self._v_weight,
+            self._q_bias, self._k_bias, self._v_bias,
+        )
+
+    def _compute_qkv(self, x: mx.array) -> tuple[mx.array, mx.array, mx.array]:
+        """Compute Q, K, V with contiguous outputs.
+
+        Uses pre-split weights (3 separate addmm) if available, otherwise
+        falls back to single QKV linear + split.
+        """
+        if self._q_weight is not None:
+            # 3 separate matmuls — each output is natively contiguous
+            q = mx.addmm(self._q_bias, x, self._q_weight.T)
+            k = mx.addmm(self._k_bias, x, self._k_weight.T)
+            v = mx.addmm(self._v_bias, x, self._v_weight.T)
+            return q, k, v
+        # Fallback: single matmul + non-contiguous split
+        qkv = self.qkv(x)
+        return mx.split(qkv, 3, axis=-1)
+
     def __call__(self, x: mx.array) -> mx.array:
         """Input: [B, N, C]. Output: [B, N', dim_out] (N' = N/q_stride if q_stride>1)."""
         batch_size, num_tokens, _ = x.shape
@@ -273,50 +344,79 @@ class MaskUnitAttention(nn.Module):
             (num_tokens // (self.q_stride * self.window_size)) if self.use_mask_unit_attn else 1
         )
 
-        # QKV projection + reshape to [B, N/num_windows, num_windows, 3, heads, head_dim]
-        qkv = self.qkv(x)
-        qkv = qkv.reshape(batch_size, -1, num_windows, 3, self.heads, self.head_dim)
-        # Permute to [3, B, heads, num_windows, tokens_per_window, head_dim]
-        qkv = mx.transpose(qkv, axes=(3, 0, 4, 2, 1, 5))
-        q, k, v = qkv[0], qkv[1], qkv[2]
+        q, k, v = self._compute_qkv(x)
 
-        if self.q_stride > 1:
-            # Max-pool over q_stride tokens in the query
-            # [B, heads, num_windows, q_stride, tokens/q_stride, head_dim]
-            q = q.reshape(batch_size, self.heads, num_windows, self.q_stride, -1, self.head_dim)
-            q = mx.max(q, axis=3)
+        if num_windows == 1 and self._use_sdpa:
+            # Fast path for global attention (stages 2-3, 19 of 24 blocks).
+            # Each q/k/v is contiguous [B, N, dim_out] — reshapes are zero-copy.
+            q = mx.transpose(q.reshape(batch_size, num_tokens, self.heads, self.head_dim), axes=(0, 2, 1, 3))
+            k = mx.transpose(k.reshape(batch_size, num_tokens, self.heads, self.head_dim), axes=(0, 2, 1, 3))
+            v = mx.transpose(v.reshape(batch_size, num_tokens, self.heads, self.head_dim), axes=(0, 2, 1, 3))
 
-        if self._use_sdpa:
-            # Fold window dim into batch for SDPA (expects 4D).
-            # Q/K/V are (B, heads, windows, tokens, head_dim) — transpose windows
-            # next to batch before reshape so (B, W, H, T, D) -> (B*W, H, T, D).
-            q_tokens = q.shape[3]
-            kv_tokens = k.shape[3]
-            q_4d = mx.transpose(q, axes=(0, 2, 1, 3, 4)).reshape(
-                batch_size * num_windows, self.heads, q_tokens, self.head_dim
-            )
-            k_4d = mx.transpose(k, axes=(0, 2, 1, 3, 4)).reshape(
-                batch_size * num_windows, self.heads, kv_tokens, self.head_dim
-            )
-            v_4d = mx.transpose(v, axes=(0, 2, 1, 3, 4)).reshape(
-                batch_size * num_windows, self.heads, kv_tokens, self.head_dim
-            )
+            if self.q_stride > 1:
+                q = q.reshape(batch_size, self.heads, self.q_stride, -1, self.head_dim)
+                q = mx.max(q, axis=2)
 
-            x = mx.fast.scaled_dot_product_attention(q_4d, k_4d, v_4d, scale=self.scale)
+            x = mx.fast.scaled_dot_product_attention(q, k, v, scale=self.scale)
 
-            # Unfold: (B*W, H, T, D) -> (B, W, H, T, D) -> (B, H, W, T, D)
-            x = x.reshape(batch_size, num_windows, self.heads, q_tokens, self.head_dim)
-            x = mx.transpose(x, axes=(0, 2, 1, 3, 4))
+            # Fused output projection: contract over heads+head_dim directly
+            # on SDPA layout [B, heads, N', head_dim], avoiding the
+            # transpose(0,2,1,3)+reshape copy that makes a contiguous copy
+            # before the proj matmul. 19 of 24 blocks use this path.
+            proj_w = self.proj.weight.reshape(self.dim_out, self.heads, self.head_dim)
+            x = mx.einsum("bhnd,ohd->bno", x, proj_w)
+            if self.proj.bias is not None:
+                x = x + self.proj.bias
+            return x
         else:
-            # Manual scaled dot-product attention (original implementation)
-            attn = (q * self.scale) @ mx.transpose(k, axes=(0, 1, 2, 4, 3))
-            attn = mx.softmax(attn, axis=-1)
-            x = attn @ v
+            # Windowed path for mask-unit attention (stages 0-1, 5 blocks).
+            # q/k/v already computed by _compute_qkv() above — each is
+            # contiguous [B, N, dim_out], so reshapes below are zero-copy.
+            tokens_per_window = num_tokens // num_windows
+            # [B, tokens_per_win, num_windows, heads, head_dim]
+            q = q.reshape(batch_size, tokens_per_window, num_windows, self.heads, self.head_dim)
+            k = k.reshape(batch_size, tokens_per_window, num_windows, self.heads, self.head_dim)
+            v = v.reshape(batch_size, tokens_per_window, num_windows, self.heads, self.head_dim)
 
-        # [B, heads, num_windows, tokens, head_dim] -> [B, tokens, num_windows, heads, head_dim]
-        # -> [B, N', dim_out]  (matches PyTorch transpose(1, 3))
-        x = mx.transpose(x, axes=(0, 3, 2, 1, 4))
-        x = x.reshape(batch_size, -1, self.dim_out)
+            if self.q_stride > 1:
+                # Group adjacent tokens by q_stride and take max for pooling
+                q = q.reshape(
+                    batch_size, self.q_stride, -1, num_windows, self.heads, self.head_dim
+                )
+                q = mx.max(q, axis=1)
+
+            if self._use_sdpa:
+                # Transpose to [B, num_windows, heads, tokens, head_dim]
+                q = mx.transpose(q, axes=(0, 2, 3, 1, 4))
+                k = mx.transpose(k, axes=(0, 2, 3, 1, 4))
+                v = mx.transpose(v, axes=(0, 2, 3, 1, 4))
+
+                q_tokens = q.shape[3]
+                kv_tokens = k.shape[3]
+                # Flatten to 4D: [B*num_windows, heads, tokens, head_dim]
+                q_4d = q.reshape(batch_size * num_windows, self.heads, q_tokens, self.head_dim)
+                k_4d = k.reshape(batch_size * num_windows, self.heads, kv_tokens, self.head_dim)
+                v_4d = v.reshape(batch_size * num_windows, self.heads, kv_tokens, self.head_dim)
+
+                x = mx.fast.scaled_dot_product_attention(q_4d, k_4d, v_4d, scale=self.scale)
+
+                # [B*W, heads, tokens, head_dim] -> [B, tokens, W, heads, head_dim]
+                # Single composed transpose instead of two sequential ones
+                x = x.reshape(batch_size, num_windows, self.heads, q_tokens, self.head_dim)
+                x = mx.transpose(x, axes=(0, 3, 1, 2, 4))
+            else:
+                # Non-SDPA fallback: [B, heads, windows, tokens, head_dim]
+                q = mx.transpose(q, axes=(0, 3, 2, 1, 4))
+                k = mx.transpose(k, axes=(0, 3, 2, 1, 4))
+                v = mx.transpose(v, axes=(0, 3, 2, 1, 4))
+
+                attn = (q * self.scale) @ mx.transpose(k, axes=(0, 1, 2, 4, 3))
+                attn = mx.softmax(attn, axis=-1)
+                x = attn @ v
+                # [B, heads, win, tokens, head_dim] -> [B, tokens, win, heads, head_dim]
+                x = mx.transpose(x, axes=(0, 3, 2, 1, 4))
+
+            x = x.reshape(batch_size, -1, self.dim_out)
 
         return self.proj(x)
 
@@ -378,9 +478,12 @@ class HieraBackbone(nn.Module):
     Hardcoded for hiera_base_plus_224 config with 4-channel input.
     """
 
-    def __init__(self, img_size: int = 512, use_sdpa: bool = True) -> None:
+    def __init__(
+        self, img_size: int = 512, use_sdpa: bool = True, bf16_stages123: bool = False
+    ) -> None:
         super().__init__()
         self.img_size = img_size
+        self._bf16_stages123 = bf16_stages123
 
         # Spatial size after patching
         self.tokens_spatial_shape = [img_size // PATCH_STRIDE[0], img_size // PATCH_STRIDE[1]]
@@ -409,6 +512,32 @@ class HieraBackbone(nn.Module):
         # Store unroll params
         self._unroll_spatial = list(self.tokens_spatial_shape)
         self._unroll_schedule = unroll_schedule
+
+        # Precompute unroll permutation — replaces 3 reshape-transpose-reshape
+        # cycles (each forcing a contiguous copy) with a single indexed gather.
+        n_full = _prod(self.tokens_spatial_shape)
+        dummy = mx.arange(n_full, dtype=mx.float32).reshape(1, n_full, 1)
+        unrolled = unroll(dummy, self._unroll_spatial, unroll_schedule)
+        self._unroll_perm = unrolled.reshape(n_full).astype(mx.int32)
+
+        # Precompute reroll permutations for each stage end — same idea.
+        self._reroll_perms: dict[int, tuple[mx.array, list[int]]] = {}
+        for se_idx in self.stage_ends:
+            remaining_sched, se_size = self._reroll_schedule[se_idx]
+            n_tokens = _prod(se_size)
+            if n_tokens == 0:
+                continue
+            dummy_r = mx.arange(n_tokens, dtype=mx.float32).reshape(1, n_tokens, 1)
+            spatial_out = reroll(dummy_r, se_idx, self._reroll_schedule)
+            self._reroll_perms[se_idx] = (
+                spatial_out.reshape(n_tokens).astype(mx.int32),
+                list(se_size),
+            )
+
+        # Materialize all permutation indices (mx.eval is MLX graph evaluation, not Python eval)
+        mx.eval(self._unroll_perm)
+        for perm, _ in self._reroll_perms.values():
+            mx.eval(perm)
 
         # Patch embedding
         self.patch_embed = HieraPatchEmbed()
@@ -476,6 +605,12 @@ class HieraBackbone(nn.Module):
         # materialize all parameters
         mx.eval(self.parameters())  # noqa: S307 — mx.eval, not Python eval
 
+        # Pre-split QKV weights for contiguous Q/K/V outputs
+        # Pre-transpose MLP weights for contiguous matmul operands
+        for blk in self.blocks:
+            blk.attn.prepare_split_qkv()
+            blk.mlp.prepare_transposed_weights()
+
     def __call__(self, x: mx.array) -> list[mx.array]:
         """Forward pass.
 
@@ -495,15 +630,23 @@ class HieraBackbone(nn.Module):
         # Add positional embedding
         x = x + self.pos_embed
 
-        # Unroll for windowed attention
-        x = unroll(x, self._unroll_spatial, self._unroll_schedule)
+        # Unroll via precomputed gather (single copy vs 3 reshape-transpose-reshape chains)
+        x = mx.take(x, self._unroll_perm, axis=1)
 
         # Run blocks, collecting features at stage_ends
         features: list[mx.array] = []
+        stage0_end = self.stage_ends[0]
         for i, blk in enumerate(self.blocks):
             x = blk(x)
+            # Cast activations to bf16 after stage 0 — halves bandwidth for
+            # stages 1-3 (22 of 24 blocks).  Stage 0 stays fp32 for precision
+            # (dim=112, mask-unit attention with q-pooling is sensitive).
+            if i == stage0_end and self._bf16_stages123:
+                x = x.astype(mx.bfloat16)
             if i in self.stage_ends:
-                feat = reroll(x, i, self._reroll_schedule)
+                # Reroll via precomputed gather (single copy vs multi-step chains)
+                perm, size = self._reroll_perms[i]
+                feat = mx.take(x, perm, axis=1).reshape(x.shape[0], size[0], size[1], x.shape[-1])
                 features.append(feat)
 
         return features

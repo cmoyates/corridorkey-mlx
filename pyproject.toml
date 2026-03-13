@@ -21,6 +21,9 @@ dev = [
     "ruff>=0.15.4",
     "ty>=0.0.19",
 ]
+video = [
+    "opencv-python-headless>=4.8.0",
+]
 reference = [
     "timm>=1.0.25",
     "torch>=2.10.0",

@@ -54,7 +54,7 @@ class CorridorKeyMLXEngine:
         tile_size: If set, enable tiled inference — split full-res input into
             overlapping tiles of this size. Model loads at tile_size instead of
             img_size. Set to 0 or None to disable.
-        overlap: Overlap in pixels between adjacent tiles (default 64).
+        overlap: Overlap in pixels between adjacent tiles (default 128).
 
     Example::
 
@@ -64,7 +64,7 @@ class CorridorKeyMLXEngine:
         engine = CorridorKeyMLXEngine("/path/to/corridorkey_mlx.safetensors")
 
         # Tiled — 12x less memory at 2048x2048
-        engine = CorridorKeyMLXEngine("/path/to/ckpt.safetensors", tile_size=512, overlap=64)
+        engine = CorridorKeyMLXEngine("/path/to/ckpt.safetensors", tile_size=512, overlap=128)
 
         result = engine.process_frame(rgb_uint8, mask_uint8)
         # result["alpha"]     — (H, W) uint8
@@ -85,11 +85,19 @@ class CorridorKeyMLXEngine:
         compile: bool = True,
         tile_size: int | None = None,
         overlap: int = DEFAULT_OVERLAP,
+        backbone_size: int | None = None,
     ) -> None:
         checkpoint = Path(checkpoint_path)
         if not checkpoint.exists():
             msg = f"Checkpoint not found: {checkpoint}"
             raise FileNotFoundError(msg)
+
+        # Tune MLX buffer commit frequency for tiled inference.
+        # Small buffers force frequent evaluation, preventing graph buildup
+        # that hurts tiled workloads. 17% faster at production resolution.
+        import os
+        os.environ.setdefault("MLX_MAX_MB_PER_BUFFER", "2")
+        os.environ.setdefault("MLX_MAX_OPS_PER_BUFFER", "2")
 
         if device is not None:
             logger.info("device=%r ignored on MLX (unified memory)", device)
@@ -103,7 +111,8 @@ class CorridorKeyMLXEngine:
             # Tiled: model runs at tile_size, input stays full-res
             self._img_size = self._tile_size
             self._model: GreenFormer = load_model(
-                checkpoint, img_size=self._tile_size, compile=False, slim=True
+                checkpoint, img_size=self._tile_size, compile=False, slim=True,
+                backbone_size=backbone_size,
             )
             logger.info(
                 "Tiled inference: tile_size=%d, overlap=%d", self._tile_size, self._overlap
@@ -111,7 +120,10 @@ class CorridorKeyMLXEngine:
         else:
             # Full-frame: resize input to img_size
             self._img_size = img_size
-            self._model = load_model(checkpoint, img_size=img_size, compile=compile, slim=True)
+            self._model = load_model(
+                checkpoint, img_size=img_size, compile=compile, slim=True,
+                backbone_size=backbone_size,
+            )
 
     def process_frame(
         self,

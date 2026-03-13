@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from corridorkey_mlx.model.corridorkey import GreenFormer
 
 DEFAULT_TILE_SIZE = 512
-DEFAULT_OVERLAP = 64
+DEFAULT_OVERLAP = 128
 
 
 def _compute_tile_coords(
@@ -159,7 +159,7 @@ def tiled_inference(
             weight_accum[y_start:y_end, x_start:x_end, :] += w3d
 
             # Deterministic memory cleanup — release MLX graph refs between tiles
-            del out, tile, alpha_tile, fg_tile
+            del out, tile, alpha_tile, fg_tile, w, w3d
             gc.collect()
             mx.clear_cache()
 

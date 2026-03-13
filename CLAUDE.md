@@ -17,8 +17,8 @@ MLX inference port of CorridorKey for Apple Silicon.
   - `inference/` — inference pipeline
   - `io/` — image loading, saving, preprocessing
   - `utils/` — shared helpers, layout transforms
-- `scripts/` — CLI tools (dump reference, compare, bench)
-- `prompts/` — phased port instructions
+- `scripts/` — CLI tools (inference, benchmarks, reference comparison)
+- `research/` — optimization findings and benchmark specs
 - `reference/` — PyTorch reference harness outputs
 - `tests/` — parity and unit tests
 
@@ -43,3 +43,16 @@ uv run ruff check .          # lint
 uv run ruff format .         # format
 uv run ty check              # type check
 ```
+
+## Fidelity policy
+
+- Fidelity is NOT an optimization target — it is a regression gate ONLY
+- Any candidate failing fidelity thresholds is rejected, regardless of speed gains
+- Correctness dominates speed — always
+- See `research/benchmark_spec.md` for thresholds and methodology
+
+## Quantization
+
+- NEVER use `nn.quantize(block, ...)` directly — Hiera stage 0 has dim=112, not divisible by 32, and will crash
+- ALWAYS use `from corridorkey_mlx.utils.quantize import safe_quantize` — it skips incompatible layers automatically
+- Int8 quantization is currently **disabled by default** — it's 11% slower on Apple Silicon (dequant overhead > bandwidth savings)

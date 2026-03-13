@@ -28,6 +28,10 @@ DEFAULT_CHECKPOINT = Path("checkpoints/corridorkey_mlx.safetensors")
 DEFAULT_IMG_SIZE = 512
 
 
+WIRED_LIMIT_BYTES = 512 * 1024 * 1024  # 512 MiB — covers model weights + working set
+CACHE_LIMIT_BYTES = 1536 * 1024 * 1024  # 1.5 GiB — forces buffer reuse, reduces peak memory
+
+
 def load_model(
     checkpoint: str | Path = DEFAULT_CHECKPOINT,
     img_size: int = DEFAULT_IMG_SIZE,
@@ -38,6 +42,15 @@ def load_model(
     slim: bool = False,
     use_sdpa: bool = True,
     stage_gc: bool = True,
+    refiner_dtype: mx.Dtype | None = None,
+    wired_limit_bytes: int | None = WIRED_LIMIT_BYTES,
+    cache_limit_bytes: int | None = CACHE_LIMIT_BYTES,
+    backbone_bf16_stages123: bool = False,
+    decoder_dtype: mx.Dtype | None = mx.bfloat16,
+    refiner_skip_confidence: float | None = None,
+    refiner_tile_size: int | None = 1024,
+    refiner_frozen_gn: bool = False,
+    backbone_size: int | None = None,
 ) -> GreenFormer:
     """Build GreenFormer and load weights from safetensors checkpoint.
 
@@ -57,7 +70,20 @@ def load_model(
             Reduces reference lifetime so MLX can reclaim buffers sooner.
         use_sdpa: If True, use mx.fast.scaled_dot_product_attention in backbone.
         stage_gc: If True, materialize + GC at backbone/decoder/refiner boundaries.
+        refiner_dtype: Dtype for refiner weights+activations. float16 halves
+            bandwidth at full resolution. None = same as backbone (fp32).
+        wired_limit_bytes: Pin this many bytes as wired/resident Metal memory.
+            Prevents OS paging and reduces p95 latency variance.
+            None = no wiring (MLX default). 512 MiB covers model weights.
+        cache_limit_bytes: Metal buffer cache size limit. Forces buffer reuse
+            when cache exceeds this, reducing peak memory. None = unlimited
+            (MLX default). 1.5 GiB balances reuse overhead vs peak memory.
     """
+    if wired_limit_bytes is not None:
+        mx.set_wired_limit(wired_limit_bytes)
+    if cache_limit_bytes is not None:
+        mx.set_cache_limit(cache_limit_bytes)
+
     model = GreenFormer(
         img_size=img_size,
         dtype=dtype,
@@ -65,6 +91,13 @@ def load_model(
         slim=slim,
         use_sdpa=use_sdpa,
         stage_gc=stage_gc,
+        refiner_dtype=refiner_dtype,
+        backbone_bf16_stages123=backbone_bf16_stages123,
+        decoder_dtype=decoder_dtype,
+        refiner_skip_confidence=refiner_skip_confidence,
+        refiner_tile_size=refiner_tile_size,
+        refiner_frozen_gn=refiner_frozen_gn,
+        backbone_size=backbone_size,
     )
     model.load_checkpoint(checkpoint)
     if compile:

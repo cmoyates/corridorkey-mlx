@@ -22,10 +22,13 @@ from rich.table import Table
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from corridorkey_mlx.model.corridorkey import GreenFormer
+from corridorkey_mlx.utils.layout import nchw_to_nhwc_np, nhwc_to_nchw_np
 
 console = Console()
 
-DEFAULT_FIXTURE = Path("reference/fixtures/golden.npz")
+FIXTURE_DIR = Path("reference/fixtures")
+DEFAULT_FIXTURE = FIXTURE_DIR / "golden.npz"
+FIXTURE_2048 = FIXTURE_DIR / "golden_2048.npz"
 DEFAULT_CHECKPOINT = Path("checkpoints/corridorkey_mlx.safetensors")
 
 # Map fixture tensor names to model output keys
@@ -42,10 +45,14 @@ TENSOR_MAP = {
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Compare MLX vs PyTorch reference")
-    parser.add_argument("--fixture", type=Path, default=DEFAULT_FIXTURE)
+    parser.add_argument("--fixture", type=Path, default=None)
     parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
     parser.add_argument("--img-size", type=int, default=512)
     args = parser.parse_args()
+
+    # Auto-select fixture based on resolution if not explicitly provided
+    if args.fixture is None:
+        args.fixture = FIXTURE_2048 if args.img_size >= 2048 else DEFAULT_FIXTURE
 
     if not args.fixture.exists():
         console.print(f"[red]Fixture not found: {args.fixture}[/red]")
@@ -66,7 +73,8 @@ def main() -> None:
     model.load_checkpoint(args.checkpoint)
 
     if "input" in ref:
-        x = mx.array(ref["input"])
+        # Golden fixture stores NCHW (PyTorch); model expects NHWC
+        x = mx.array(nchw_to_nhwc_np(ref["input"]))
     else:
         console.print("[yellow]No 'input' key in fixture, using random input[/yellow]")
         mx.random.seed(42)
@@ -92,7 +100,8 @@ def main() -> None:
             continue
 
         ref_tensor = ref[ref_key]
-        mlx_tensor = np.array(outputs[mlx_key])
+        # MLX outputs are NHWC; golden refs are NCHW — convert for comparison
+        mlx_tensor = nhwc_to_nchw_np(np.array(outputs[mlx_key]))
 
         if ref_tensor.shape != mlx_tensor.shape:
             table.add_row(

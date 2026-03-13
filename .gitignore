@@ -1,3 +1,6 @@
+# Metal GPU traces
+*.gputrace/
+
 # Python-generated files
 __pycache__/
 *.py[oc]
@@ -15,6 +18,9 @@ checkpoints/
 # Large generated fixtures (golden .npz kept small; regenerate with dump script)
 reference/fixtures/*.npz
 
+# Video test footage (large binary frames)
+reference/video/
+
 # Sample images
 samples/
 
@@ -31,3 +37,8 @@ artifacts/
 .DS_Store
 
 *.safetensors*
+
+# Research lab artifacts (machine-local, not committed)
+research/artifacts/
+research/best_result.json
+research/best_result_*.json

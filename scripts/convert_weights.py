@@ -66,6 +66,11 @@ def main() -> None:
         default=DEFAULT_OUTPUT,
         help="Output .safetensors path",
     )
+    parser.add_argument(
+        "--mixed-precision",
+        action="store_true",
+        help="Save decoder/refiner weights as bf16 (halves their size)",
+    )
     args = parser.parse_args()
 
     if not args.checkpoint.exists():
@@ -74,10 +79,16 @@ def main() -> None:
 
     console.print(f"[bold]Converting:[/bold] {args.checkpoint}")
     console.print(f"[bold]Output:[/bold] {args.output}")
+    if args.mixed_precision:
+        console.print("[bold]Mixed precision:[/bold] decoder/refiner → bf16")
 
-    diagnostics = convert_checkpoint(args.checkpoint, args.output)
+    diagnostics, bf16_count = convert_checkpoint(
+        args.checkpoint, args.output, mixed_precision=args.mixed_precision
+    )
     print_diagnostics(diagnostics)
 
+    if bf16_count > 0:
+        console.print(f"\n[bold]bf16 keys:[/bold] {bf16_count}")
     console.print(f"\n[green]Saved to {args.output}[/green]")
 
 

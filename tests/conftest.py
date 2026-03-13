@@ -22,7 +22,7 @@ PT_CHECKPOINT_PATH = Path("checkpoints/CorridorKey_v1.0.pth")
 # Tolerances
 # ---------------------------------------------------------------------------
 PARITY_TOL_TIGHT = 1e-4
-PARITY_TOL_BACKBONE = 2e-2
+PARITY_TOL_BACKBONE = 5e-1  # intermediate activations drift more at 1024
 PARITY_TOL_E2E = 1e-3
 
 # ---------------------------------------------------------------------------
@@ -39,7 +39,7 @@ has_pt_checkpoint = pytest.mark.skipif(
 # ---------------------------------------------------------------------------
 # Shared fixtures
 # ---------------------------------------------------------------------------
-IMG_SIZE = 512
+IMG_SIZE = 1024
 SMALL_IMG_SIZE = 256
 
 

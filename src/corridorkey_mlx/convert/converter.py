@@ -8,6 +8,7 @@ Transforms applied:
 - Refiner stem: Sequential indices → named attrs (stem.0 → stem_conv, stem.1 → stem_gn)
 - BatchNorm num_batches_tracked: dropped (MLX doesn't use it)
 - All other weights: passed through unchanged
+- Mixed precision (optional): decoder/refiner weights saved as bf16
 
 Output: safetensors file with transformed weights.
 """
@@ -38,6 +39,11 @@ REFINER_STEM_MAP: dict[str, str] = {
 
 # Keys to skip entirely (not needed by MLX)
 SKIP_SUFFIXES = (".num_batches_tracked",)
+
+# Key prefixes for bf16 mixed-precision checkpoint.
+# Decoder and refiner run in bf16 at inference time; pre-casting at conversion
+# time halves their checkpoint footprint and eliminates runtime fp32→bf16 casts.
+BF16_PREFIXES = ("alpha_decoder.", "fg_decoder.", "refiner.")
 
 # Explicit set of conv weight keys that need NCHW→NHWC transpose.
 # Uses pre-remap names (checked before key remapping in the conversion loop).
@@ -176,12 +182,45 @@ def load_pytorch_checkpoint(checkpoint_path: Path) -> dict[str, np.ndarray]:
 # ---------------------------------------------------------------------------
 # Safetensors output
 # ---------------------------------------------------------------------------
-def save_safetensors(weights: OrderedDict[str, np.ndarray], output_path: Path) -> None:
-    """Save converted weights as safetensors."""
-    from safetensors.numpy import save_file
+def save_safetensors(
+    weights: OrderedDict[str, np.ndarray],
+    output_path: Path,
+    mixed_precision: bool = False,
+) -> int:
+    """Save converted weights as safetensors.
 
+    Args:
+        weights: Converted weight dict (numpy arrays, fp32).
+        output_path: Output file path.
+        mixed_precision: If True, cast decoder/refiner weights to bf16
+            using MLX (numpy doesn't support bfloat16). Halves checkpoint
+            size for those layers.
+
+    Returns:
+        Number of keys cast to bf16 (0 if mixed_precision=False).
+    """
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    save_file(weights, str(output_path))
+
+    if not mixed_precision:
+        from safetensors.numpy import save_file
+
+        save_file(weights, str(output_path))
+        return 0
+
+    # Mixed precision: convert to MLX arrays, cast bf16 targets, save via MLX
+    import mlx.core as mx
+
+    bf16_count = 0
+    mlx_weights: dict[str, mx.array] = {}
+    for key, arr in weights.items():
+        tensor = mx.array(arr)
+        if any(key.startswith(prefix) for prefix in BF16_PREFIXES):
+            tensor = tensor.astype(mx.bfloat16)
+            bf16_count += 1
+        mlx_weights[key] = tensor
+
+    mx.save_safetensors(str(output_path), mlx_weights)
+    return bf16_count
 
 
 # ---------------------------------------------------------------------------
@@ -190,17 +229,19 @@ def save_safetensors(weights: OrderedDict[str, np.ndarray], output_path: Path) -
 def convert_checkpoint(
     checkpoint_path: Path,
     output_path: Path,
-) -> list[ConversionRecord]:
+    mixed_precision: bool = False,
+) -> tuple[list[ConversionRecord], int]:
     """Full conversion pipeline: load PyTorch checkpoint → convert → save safetensors.
 
     Args:
         checkpoint_path: Path to PyTorch .pth checkpoint.
         output_path: Path for output .safetensors file.
+        mixed_precision: If True, save decoder/refiner weights as bf16.
 
     Returns:
-        List of conversion diagnostic records.
+        Tuple of (list of conversion diagnostic records, number of bf16 keys).
     """
     state_dict = load_pytorch_checkpoint(checkpoint_path)
     converted, diagnostics = convert_state_dict(state_dict)
-    save_safetensors(converted, output_path)
-    return diagnostics
+    bf16_count = save_safetensors(converted, output_path, mixed_precision=mixed_precision)
+    return diagnostics, bf16_count

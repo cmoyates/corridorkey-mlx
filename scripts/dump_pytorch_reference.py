@@ -410,6 +410,12 @@ def main() -> None:
         default=SEED,
         help="Random seed for deterministic input",
     )
+    parser.add_argument(
+        "--img-size",
+        type=int,
+        default=IMG_SIZE,
+        help="Input resolution (default: 512)",
+    )
     args = parser.parse_args()
 
     if not args.checkpoint.exists():
@@ -421,8 +427,8 @@ def main() -> None:
     torch.manual_seed(args.seed)
     torch.set_grad_enabled(False)
 
-    console.print("[bold]Building GreenFormer model...[/bold]")
-    model = GreenFormer()
+    console.print(f"[bold]Building GreenFormer model (img_size={args.img_size})...[/bold]")
+    model = GreenFormer(img_size=args.img_size)
     # Set to evaluation mode (disables dropout, uses running stats for BatchNorm)
     model.train(False)
 
@@ -431,7 +437,7 @@ def main() -> None:
 
     # Deterministic input
     torch.manual_seed(args.seed)
-    sample_input = torch.randn(1, INPUT_CHANNELS, IMG_SIZE, IMG_SIZE)
+    sample_input = torch.randn(1, INPUT_CHANNELS, args.img_size, args.img_size)
 
     shape_str = str(tuple(sample_input.shape))
     console.print(f"[bold]Running forward pass (input shape: {shape_str})...[/bold]")
