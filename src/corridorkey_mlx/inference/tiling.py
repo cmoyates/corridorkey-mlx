@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from corridorkey_mlx.model.corridorkey import GreenFormer
 
 DEFAULT_TILE_SIZE = 512
-DEFAULT_OVERLAP = 64
+DEFAULT_OVERLAP = 128
 
 
 def _compute_tile_coords(

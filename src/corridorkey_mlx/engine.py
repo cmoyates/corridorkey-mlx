@@ -54,7 +54,7 @@ class CorridorKeyMLXEngine:
         tile_size: If set, enable tiled inference — split full-res input into
             overlapping tiles of this size. Model loads at tile_size instead of
             img_size. Set to 0 or None to disable.
-        overlap: Overlap in pixels between adjacent tiles (default 64).
+        overlap: Overlap in pixels between adjacent tiles (default 128).
 
     Example::
 
@@ -64,7 +64,7 @@ class CorridorKeyMLXEngine:
         engine = CorridorKeyMLXEngine("/path/to/corridorkey_mlx.safetensors")
 
         # Tiled — 12x less memory at 2048x2048
-        engine = CorridorKeyMLXEngine("/path/to/ckpt.safetensors", tile_size=512, overlap=64)
+        engine = CorridorKeyMLXEngine("/path/to/ckpt.safetensors", tile_size=512, overlap=128)
 
         result = engine.process_frame(rgb_uint8, mask_uint8)
         # result["alpha"]     — (H, W) uint8
