@@ -32,7 +32,27 @@ Deep Feature Flow (CVPR 2017) showed 2-4x speedup with backbone skip on video se
 - **Decomposed forward API**: `run_backbone()`, `run_decoders()`, `run_refiner()` on GreenFormer — bit-exact with `__call__`, useful for profiling and future experiments
 - **VideoProcessor `skip_interval` param** — functional but produces unacceptable quality
 
+## Frame-by-Frame Comparison (v0 vs skip2 @ 2048)
+
+37-frame clip, 3840x1080 side-by-side composites (alpha + foreground).
+
+| Metric | Non-skipped frames | Skipped frames |
+|--------|-------------------|----------------|
+| Max abs diff | 33-112 | 255 |
+| Mean abs diff | 0.29-0.43 | 2.5-10.6 |
+| PSNR | 44-48 dB | 16-24 dB |
+| Pixels >5 diff | 0.6-1.7% | 5-14% |
+
+Worst frames: 2, 6, 32, 36 (mean diff >9, PSNR <17 dB). Errors concentrate on silhouette edges and fast-moving regions (arms, wig). Skipped frames show wrong-pose mattes — previous frame's silhouette applied to current frame's RGB.
+
+## Possible Future Directions
+
+- Optical flow warping of cached features before decoder (not naive reuse)
+- Temporal attention / feature interpolation between keyframes
+- Adaptive skip: only skip when motion is below threshold
+
 ## Artifacts
 
 - `research/artifacts/video_v2_skip{2,3,5}.json` — full benchmark + fidelity data
-- `output/video_skip2/` — visual output for inspection
+- `output/video_skip2_2048/comp.mp4` — skip2 composite at 2048
+- `output/video_v0_2048/comp.mp4` — V0 baseline composite at 2048
