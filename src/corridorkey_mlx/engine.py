@@ -85,6 +85,7 @@ class CorridorKeyMLXEngine:
         compile: bool = True,
         tile_size: int | None = None,
         overlap: int = DEFAULT_OVERLAP,
+        backbone_size: int | None = None,
     ) -> None:
         checkpoint = Path(checkpoint_path)
         if not checkpoint.exists():
@@ -103,7 +104,8 @@ class CorridorKeyMLXEngine:
             # Tiled: model runs at tile_size, input stays full-res
             self._img_size = self._tile_size
             self._model: GreenFormer = load_model(
-                checkpoint, img_size=self._tile_size, compile=False, slim=True
+                checkpoint, img_size=self._tile_size, compile=False, slim=True,
+                backbone_size=backbone_size,
             )
             logger.info(
                 "Tiled inference: tile_size=%d, overlap=%d", self._tile_size, self._overlap
@@ -111,7 +113,10 @@ class CorridorKeyMLXEngine:
         else:
             # Full-frame: resize input to img_size
             self._img_size = img_size
-            self._model = load_model(checkpoint, img_size=img_size, compile=compile, slim=True)
+            self._model = load_model(
+                checkpoint, img_size=img_size, compile=compile, slim=True,
+                backbone_size=backbone_size,
+            )
 
     def process_frame(
         self,

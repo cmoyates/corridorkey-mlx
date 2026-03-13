@@ -50,6 +50,7 @@ class GreenFormer(nn.Module):
         decoder_dtype: mx.Dtype | None = mx.bfloat16,
         refiner_skip_confidence: float | None = None,
         refiner_frozen_gn: bool = False,
+        backbone_size: int | None = None,
     ) -> None:
         super().__init__()
         self._compute_dtype = dtype
@@ -69,8 +70,14 @@ class GreenFormer(nn.Module):
         self._refiner_frozen_gn = refiner_frozen_gn
         self._tiles_skipped = 0  # diagnostic counter, reset per forward
         self._tiles_total = 0
+
+        # Decoupled resolution: backbone at backbone_size, refiner at img_size
+        backbone_res = backbone_size if backbone_size is not None else img_size
+        self._decoupled = backbone_res != img_size
+        self._img_size = img_size
+
         self.backbone = HieraBackbone(
-            img_size=img_size, use_sdpa=use_sdpa, bf16_stages123=backbone_bf16_stages123
+            img_size=backbone_res, use_sdpa=use_sdpa, bf16_stages123=backbone_bf16_stages123
         )
         self.alpha_decoder = DecoderHead(BACKBONE_CHANNELS, EMBED_DIM, output_dim=1)
         self.fg_decoder = DecoderHead(BACKBONE_CHANNELS, EMBED_DIM, output_dim=3)
@@ -91,6 +98,21 @@ class GreenFormer(nn.Module):
         self._logit_upsampler = nn.Upsample(
             scale_factor=(4.0, 4.0), mode="linear", align_corners=False
         )
+
+        # Resamplers for decoupled resolution (backbone_size != img_size)
+        if self._decoupled:
+            down_scale = backbone_res / img_size
+            self._backbone_downsampler = nn.Upsample(
+                scale_factor=(down_scale, down_scale),
+                mode="linear",
+                align_corners=False,
+            )
+            up_scale = img_size / backbone_res
+            self._fullres_upsampler = nn.Upsample(
+                scale_factor=(up_scale, up_scale),
+                mode="linear",
+                align_corners=False,
+            )
 
     @property
     def tile_skip_stats(self) -> tuple[int, int]:
@@ -121,6 +143,13 @@ class GreenFormer(nn.Module):
             alpha_coarse, fg_coarse, delta_logits, alpha_final, fg_final.
             All tensors in NHWC format.
         """
+        # Keep full-res input for refiner when resolutions are decoupled
+        x_full = x
+
+        # Downsample to backbone resolution if decoupled
+        if self._decoupled:
+            x = self._backbone_downsampler(x)
+
         # Backbone always runs in fp32
         backbone_fn = self._compiled_backbone_call or self.backbone
         features = backbone_fn(x)
@@ -129,7 +158,7 @@ class GreenFormer(nn.Module):
         if self._compute_dtype != mx.float32:
             features = [f.astype(self._compute_dtype) for f in features]
 
-        # Decoder heads -> logits at H/4 resolution
+        # Decoder heads -> logits at backbone_H/4 resolution
         if self._fused_decode:
             fused_fn = self._compiled_fused_pair_call or self._fused_pair
             alpha_logits, fg_logits = fused_fn(features)
@@ -137,22 +166,26 @@ class GreenFormer(nn.Module):
 
             alpha_logits_up = self._logit_upsampler(alpha_logits)
             fg_logits_up = self._logit_upsampler(fg_logits)
-            alpha_coarse = mx.sigmoid(alpha_logits_up)
-            fg_coarse = mx.sigmoid(fg_logits_up)
         else:
             alpha_fn = self._compiled_alpha_decoder_call or self.alpha_decoder
             fg_fn = self._compiled_fg_decoder_call or self.fg_decoder
-            alpha_logits = alpha_fn(features)  # (B, H/4, W/4, 1)
-            fg_logits = fg_fn(features)  # (B, H/4, W/4, 3)
+            alpha_logits = alpha_fn(features)  # (B, bH/4, bW/4, 1)
+            fg_logits = fg_fn(features)  # (B, bH/4, bW/4, 3)
             del features
 
-            alpha_logits_up = self._logit_upsampler(alpha_logits)  # (B, H, W, 1)
-            alpha_coarse = mx.sigmoid(alpha_logits_up)
-            fg_logits_up = self._logit_upsampler(fg_logits)  # (B, H, W, 3)
-            fg_coarse = mx.sigmoid(fg_logits_up)
+            alpha_logits_up = self._logit_upsampler(alpha_logits)  # (B, bH, bW, 1)
+            fg_logits_up = self._logit_upsampler(fg_logits)  # (B, bH, bW, 3)
+
+        # Upsample coarse logits from backbone_size to full res if decoupled
+        if self._decoupled:
+            alpha_logits_up = self._fullres_upsampler(alpha_logits_up)
+            fg_logits_up = self._fullres_upsampler(fg_logits_up)
+
+        alpha_coarse = mx.sigmoid(alpha_logits_up)
+        fg_coarse = mx.sigmoid(fg_logits_up)
 
         # Refiner receives coarse predictions (optionally in reduced precision)
-        rgb = x[:, :, :, :3]  # (B, H, W, 3)
+        rgb = x_full[:, :, :, :3]  # (B, H, W, 3)
         coarse_pred = mx.concatenate([alpha_coarse, fg_coarse], axis=-1)  # (B, H, W, 4)
         refiner_fn = self._compiled_refiner_call or self.refiner
 
@@ -312,13 +345,20 @@ class GreenFormer(nn.Module):
         Used by the per-component compilation path (compile_forward=False).
         NOT safe for wrapping with mx.compile — use __call__ instead.
         """
+        # Keep full-res input for refiner when resolutions are decoupled
+        x_full = x
+
+        # Downsample to backbone resolution if decoupled
+        if self._decoupled:
+            x = self._backbone_downsampler(x)
+
         # Backbone always runs in fp32
         backbone_fn = self._compiled_backbone_call or self.backbone
         features = backbone_fn(x)
 
         # Async-materialize backbone features so the CPU can build the
         # decoder graph while the GPU finishes backbone work.
-        # NOTE: mx.async_eval is MLX async materialization, not Python eval()
+        # NOTE: mx.async_eval is MLX array materialization, not Python's eval()
         if self._stage_gc:
             mx.async_eval(*features)  # noqa: S307  -- mx.async_eval, not builtins
 
@@ -326,7 +366,7 @@ class GreenFormer(nn.Module):
         if self._compute_dtype != mx.float32:
             features = [f.astype(self._compute_dtype) for f in features]
 
-        # Decoder heads -> logits at H/4 resolution
+        # Decoder heads -> logits at backbone_H/4 resolution
         if self._fused_decode:
             fused_fn = self._compiled_fused_pair_call or self._fused_pair
             alpha_logits, fg_logits = fused_fn(features)
@@ -334,32 +374,36 @@ class GreenFormer(nn.Module):
 
             alpha_logits_up = self._logit_upsampler(alpha_logits)
             fg_logits_up = self._logit_upsampler(fg_logits)
-            alpha_coarse = mx.sigmoid(alpha_logits_up)
-            fg_coarse = mx.sigmoid(fg_logits_up)
         else:
             alpha_fn = self._compiled_alpha_decoder_call or self.alpha_decoder
             fg_fn = self._compiled_fg_decoder_call or self.fg_decoder
             # Alpha pipeline on default stream
-            alpha_logits = alpha_fn(features)  # (B, H/4, W/4, 1)
+            alpha_logits = alpha_fn(features)  # (B, bH/4, bW/4, 1)
             # FG pipeline on secondary stream
             with mx.stream(self._fg_stream):
-                fg_logits = fg_fn(features)  # (B, H/4, W/4, 3)
+                fg_logits = fg_fn(features)  # (B, bH/4, bW/4, 3)
 
             del features
 
-            alpha_logits_up = self._logit_upsampler(alpha_logits)  # (B, H, W, 1)
-            alpha_coarse = mx.sigmoid(alpha_logits_up)
-            fg_logits_up = self._logit_upsampler(fg_logits)  # (B, H, W, 3)
-            fg_coarse = mx.sigmoid(fg_logits_up)
+            alpha_logits_up = self._logit_upsampler(alpha_logits)  # (B, bH, bW, 1)
+            fg_logits_up = self._logit_upsampler(fg_logits)  # (B, bH, bW, 3)
+
+        # Upsample coarse logits from backbone_size to full res if decoupled
+        if self._decoupled:
+            alpha_logits_up = self._fullres_upsampler(alpha_logits_up)
+            fg_logits_up = self._fullres_upsampler(fg_logits_up)
+
+        alpha_coarse = mx.sigmoid(alpha_logits_up)
+        fg_coarse = mx.sigmoid(fg_logits_up)
 
         # Async-materialize decoder outputs before refiner to free decoder
         # intermediate buffers (im2col inflation in refiner).
-        # NOTE: mx.async_eval is MLX async materialization, not Python eval()
+        # NOTE: mx.async_eval is MLX array materialization, not Python's eval()
         if self._stage_gc:
-            mx.async_eval(alpha_logits_up, fg_logits_up, alpha_coarse, fg_coarse)  # noqa: S307  -- mx.async_eval, not Python eval
+            mx.async_eval(alpha_logits_up, fg_logits_up, alpha_coarse, fg_coarse)  # noqa: S307  -- mx.async_eval, not Python's eval
 
         # Refiner receives coarse predictions (optionally in reduced precision)
-        rgb = x[:, :, :, :3]  # (B, H, W, 3)
+        rgb = x_full[:, :, :, :3]  # (B, H, W, 3)
         coarse_pred = mx.concatenate([alpha_coarse, fg_coarse], axis=-1)  # (B, H, W, 4)
         refiner_fn = self._compiled_refiner_call or self.refiner
 
@@ -589,11 +633,12 @@ class GreenFormer(nn.Module):
         # Precompute refiner 1x1 conv weight for addmm bypass
         self.refiner.prepare_inference()
 
-        if self._compile_forward:
+        if self._compile_forward and not self._decoupled:
             # Whole-forward compilation: fuses backbone + decoders + upsample +
             # sigmoid + refiner + final sigmoid into a single compiled graph.
             # Eliminates eager Metal dispatches between components and the
             # stage_gc sync point.
+            # Disabled when decoupled — dual-resolution forward has varying shapes.
             self._compiled = True
             self.__call__ = mx.compile(self.__call__)  # type: ignore[method-assign]
         else:

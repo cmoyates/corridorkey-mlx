@@ -50,6 +50,7 @@ def load_model(
     refiner_skip_confidence: float | None = None,
     refiner_tile_size: int | None = 1024,
     refiner_frozen_gn: bool = False,
+    backbone_size: int | None = None,
 ) -> GreenFormer:
     """Build GreenFormer and load weights from safetensors checkpoint.
 
@@ -96,6 +97,7 @@ def load_model(
         refiner_skip_confidence=refiner_skip_confidence,
         refiner_tile_size=refiner_tile_size,
         refiner_frozen_gn=refiner_frozen_gn,
+        backbone_size=backbone_size,
     )
     model.load_checkpoint(checkpoint)
     if compile:
