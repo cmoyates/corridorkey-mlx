@@ -106,6 +106,7 @@ class VideoProcessor:
         async_save: bool = True,
         skip_interval: int = 1,
         ema_alpha: float | None = None,
+        async_decode: bool = False,
     ) -> None:
         self.model = model
         self.img_size = img_size
@@ -113,6 +114,7 @@ class VideoProcessor:
         self.async_save = async_save
         self.skip_interval = max(1, skip_interval)
         self.ema_alpha = ema_alpha  # None = disabled, 0.6-0.8 typical
+        self.async_decode = async_decode  # overlap decode N+1 with GPU N
 
         # Feature cache for backbone skip (bare variables, not a class)
         self._cached_features: list[mx.array] | None = None
@@ -238,18 +240,61 @@ class VideoProcessor:
         outputs = self.model.run_refiner(x, coarse)
         return outputs
 
+    def _postprocess_frame(
+        self,
+        outputs: dict[str, mx.array],
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Convert MLX outputs to uint8 numpy with optional EMA blending."""
+        alpha_f32 = np.array(outputs["alpha_final"][0, :, :, 0])
+        fg_f32 = np.array(outputs["fg_final"][0])
+
+        # EMA temporal blending (output-space)
+        if self.ema_alpha is not None and self._prev_alpha is not None:
+            a = self.ema_alpha
+            alpha_f32 = a * alpha_f32 + (1.0 - a) * self._prev_alpha
+            fg_f32 = a * fg_f32 + (1.0 - a) * self._prev_fg
+
+        if self.ema_alpha is not None:
+            self._prev_alpha = alpha_f32.copy()
+            self._prev_fg = fg_f32.copy()
+
+        alpha_u8 = (np.clip(alpha_f32, 0.0, 1.0) * 255.0).astype(np.uint8)
+        fg_u8 = (np.clip(fg_f32, 0.0, 1.0) * 255.0).astype(np.uint8)
+
+        # Resize back to original video dimensions
+        if self._orig_size != (self.img_size, self.img_size):
+            alpha_pil = Image.fromarray(alpha_u8, mode="L")
+            alpha_u8 = np.asarray(
+                alpha_pil.resize(self._orig_size, Image.Resampling.LANCZOS)
+            )
+            fg_pil = Image.fromarray(fg_u8, mode="RGB")
+            fg_u8 = np.asarray(
+                fg_pil.resize(self._orig_size, Image.Resampling.LANCZOS)
+            )
+
+        return alpha_u8, fg_u8
+
     def _process_loop(
         self,
         input_cap: Any,
         hint_cap: Any,
         num_frames: int,
     ) -> Generator[FrameResult, None, None]:
-        """Inner loop: decode -> preprocess -> infer -> postprocess -> yield."""
+        """Inner loop: decode -> preprocess -> infer -> postprocess -> yield.
+
+        When async_decode=True, overlaps frame N+1 decode (CPU) with frame N
+        GPU inference via threaded decode-ahead + mx.async_eval.
+        """
         save_executor = None
         save_future = None
 
         if self.async_save and self.output_dir is not None:
             save_executor = ThreadPoolExecutor(max_workers=1)
+
+        # Decode-ahead executor (separate from save executor)
+        decode_executor = None
+        if self.async_decode:
+            decode_executor = ThreadPoolExecutor(max_workers=1)
 
         # Reset state for this video
         self._cached_features = None
@@ -258,67 +303,51 @@ class VideoProcessor:
         self._prev_fg = None
 
         try:
+            # Pre-decode frame 0 (always synchronous)
+            next_decode = self._decode_frame(input_cap, hint_cap, 0)
+
             for frame_idx in range(num_frames):
-                # --- Decode ---
-                rgb_f32, mask_f32, decode_ms = self._decode_frame(
-                    input_cap, hint_cap, frame_idx
-                )
+                rgb_f32, mask_f32, decode_ms = next_decode
 
                 # --- Preprocess + Infer ---
                 t_infer = time.perf_counter()
                 x = preprocess_mlx(rgb_f32, mask_f32)
                 is_keyframe = self._is_keyframe(frame_idx)
                 outputs = self._infer_frame(x, is_keyframe)
-                # Materialize + sync for accurate per-frame timing.
-                # mx.eval is MLX array materialization, not Python eval().
-                mx.eval(outputs)  # noqa: S307
-                infer_ms = (time.perf_counter() - t_infer) * 1000.0
+
+                if self.async_decode and frame_idx + 1 < num_frames:
+                    # mx.async_eval: MLX array materialization (not Python eval)
+                    mx.async_eval(outputs)  # noqa: S307
+                    # Decode next frame on CPU thread while GPU computes
+                    decode_future = decode_executor.submit(  # type: ignore[union-attr]
+                        self._decode_frame, input_cap, hint_cap, frame_idx + 1
+                    )
+                    # np.array() blocks until GPU done
+                    alpha_u8, fg_u8 = self._postprocess_frame(outputs)
+                    infer_ms = (time.perf_counter() - t_infer) * 1000.0
+                    next_decode = decode_future.result()
+                else:
+                    # Synchronous: last frame or async disabled
+                    # mx.eval: MLX array materialization (not Python eval)
+                    mx.eval(outputs)  # noqa: S307
+                    infer_ms = (time.perf_counter() - t_infer) * 1000.0
+                    alpha_u8, fg_u8 = self._postprocess_frame(outputs)
+                    if frame_idx + 1 < num_frames:
+                        next_decode = self._decode_frame(
+                            input_cap, hint_cap, frame_idx + 1
+                        )
 
                 if is_keyframe:
                     self._cached_frame_idx = frame_idx
 
-                # --- Postprocess ---
-                alpha_f32 = np.array(outputs["alpha_final"][0, :, :, 0])
-                fg_f32 = np.array(outputs["fg_final"][0])
-
-                # --- EMA temporal blending (output-space) ---
-                if self.ema_alpha is not None and self._prev_alpha is not None:
-                    a = self.ema_alpha
-                    alpha_f32 = a * alpha_f32 + (1.0 - a) * self._prev_alpha
-                    fg_f32 = a * fg_f32 + (1.0 - a) * self._prev_fg
-
-                if self.ema_alpha is not None:
-                    # Store pre-clip float32 for next frame's blending
-                    self._prev_alpha = alpha_f32.copy()
-                    self._prev_fg = fg_f32.copy()
-
-                alpha_u8 = (np.clip(alpha_f32, 0.0, 1.0) * 255.0).astype(np.uint8)
-                fg_u8 = (np.clip(fg_f32, 0.0, 1.0) * 255.0).astype(np.uint8)
-
-                # Resize back to original video dimensions
-                if self._orig_size != (self.img_size, self.img_size):
-                    alpha_pil = Image.fromarray(alpha_u8, mode="L")
-                    alpha_u8 = np.asarray(
-                        alpha_pil.resize(self._orig_size, Image.Resampling.LANCZOS)
-                    )
-                    fg_pil = Image.fromarray(fg_u8, mode="RGB")
-                    fg_u8 = np.asarray(
-                        fg_pil.resize(self._orig_size, Image.Resampling.LANCZOS)
-                    )
-
-                # Release MLX arrays
                 del outputs, x
-
-                # --- Memory monitoring ---
                 peak_mb = mx.get_peak_memory() / 1e6
 
                 # --- Save ---
                 save_ms = 0.0
                 if self.output_dir is not None:
-                    # Wait for previous async save to complete
                     if save_future is not None:
                         save_future.result()
-
                     if save_executor is not None:
                         save_future = save_executor.submit(
                             _save_frame_png, alpha_u8, fg_u8, self.output_dir, frame_idx
@@ -328,7 +357,6 @@ class VideoProcessor:
                         _save_frame_png(alpha_u8, fg_u8, self.output_dir, frame_idx)
                         save_ms = (time.perf_counter() - t_save) * 1000.0
 
-                # Periodic GC — at most every 10 frames, not every frame
                 if frame_idx > 0 and frame_idx % 10 == 0:
                     import gc
 
@@ -345,10 +373,10 @@ class VideoProcessor:
                     is_keyframe=is_keyframe,
                 )
         finally:
-            # Wait for last save and shutdown executor
             if save_future is not None:
                 save_future.result()
             if save_executor is not None:
                 save_executor.shutdown(wait=True)
-            # Release cached features
+            if decode_executor is not None:
+                decode_executor.shutdown(wait=True)
             self._cached_features = None

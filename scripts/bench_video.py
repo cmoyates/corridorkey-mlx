@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Video benchmark harness for CorridorKey MLX temporal experiments.
 
-Supports V0 baseline (skip=1) and V2 backbone skip (skip=2,3,5).
-When skip>1, compares per-frame fidelity against V0 reference PNGs.
+Supports V0 baseline, V1 EMA blending, V2 async pipeline, and backbone skip.
+Computes Tier 1 (max_abs) + Tier 2 (PSNR/SSIM/dtSSD) fidelity metrics.
 
 Usage:
-    uv run python scripts/bench_video.py                    # V0 baseline
-    uv run python scripts/bench_video.py --skip 3           # V2 skip=3
-    uv run python scripts/bench_video.py --sweep 2 3 5      # V2 sweep
+    uv run python scripts/bench_video.py                              # V0 baseline
+    uv run python scripts/bench_video.py --ema-alpha 0.7              # V1 EMA
+    uv run python scripts/bench_video.py --ema-sweep 0.6 0.7 0.8     # V1 sweep
+    uv run python scripts/bench_video.py --async-decode               # V2 async
+    uv run python scripts/bench_video.py --async-decode --ema-alpha 0.7  # V1+V2
+    uv run python scripts/bench_video.py --skip 3                     # backbone skip
 """
 
 from __future__ import annotations
@@ -234,6 +237,7 @@ def _run_benchmark(
     skip: int,
     save_reference: bool,
     ema_alpha: float | None = None,
+    async_decode: bool = False,
 ) -> dict[str, object]:
     """Run a single benchmark pass with given skip interval and optional EMA."""
     out_dir = REFERENCE_DIR if save_reference else None
@@ -244,6 +248,7 @@ def _run_benchmark(
         async_save=True,
         skip_interval=skip,
         ema_alpha=ema_alpha,
+        async_decode=async_decode,
     )
 
     parts = []
@@ -251,6 +256,8 @@ def _run_benchmark(
         parts.append(f"skip={skip}")
     if ema_alpha is not None:
         parts.append(f"ema={ema_alpha}")
+    if async_decode:
+        parts.append("async")
     label = ", ".join(parts) if parts else "V0 baseline"
     print(f"\nBenchmark run ({label})...")
     results: list[FrameResult] = []
@@ -285,12 +292,15 @@ def _run_benchmark(
         exp_parts.append(f"skip-{skip}")
     if ema_alpha is not None:
         exp_parts.append(f"ema-{ema_alpha}")
+    if async_decode:
+        exp_parts.append("async")
     experiment_name = f"video-{'_'.join(exp_parts)}" if exp_parts else "video-v0-baseline"
 
     metrics: dict[str, object] = {
         "experiment": experiment_name,
         "skip_interval": skip,
         "ema_alpha": ema_alpha,
+        "async_decode": async_decode,
         "img_size": args.img_size,
         "num_frames": num_frames,
         "total_wall_clock_s": round(total_wall_s, 3),
@@ -404,6 +414,10 @@ def main() -> None:
         "--ema-sweep", type=float, nargs="+", metavar="A",
         help="Sweep EMA alpha values (e.g. --ema-sweep 0.6 0.7 0.8)",
     )
+    parser.add_argument(
+        "--async-decode", action="store_true",
+        help="V2: overlap frame decode (CPU) with GPU inference",
+    )
     args = parser.parse_args()
 
     for p, name in [(args.input, "Input"), (args.hint, "Hint"), (args.checkpoint, "Checkpoint")]:
@@ -434,9 +448,11 @@ def main() -> None:
     all_metrics: list[dict[str, object]] = []
     for skip in skip_intervals:
         for ema_alpha in ema_alphas:
-            save_ref = (skip == 1 and ema_alpha is None) and not args.no_save_reference
+            is_vanilla = skip == 1 and ema_alpha is None and not args.async_decode
+            save_ref = is_vanilla and not args.no_save_reference
             metrics = _run_benchmark(
-                model, args, skip, save_reference=save_ref, ema_alpha=ema_alpha,
+                model, args, skip, save_reference=save_ref,
+                ema_alpha=ema_alpha, async_decode=args.async_decode,
             )
             metrics["load_time_s"] = round(load_time_s, 2)
             all_metrics.append(metrics)
