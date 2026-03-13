@@ -105,16 +105,22 @@ class VideoProcessor:
         output_dir: Path | None = None,
         async_save: bool = True,
         skip_interval: int = 1,
+        ema_alpha: float | None = None,
     ) -> None:
         self.model = model
         self.img_size = img_size
         self.output_dir = output_dir
         self.async_save = async_save
         self.skip_interval = max(1, skip_interval)
+        self.ema_alpha = ema_alpha  # None = disabled, 0.6-0.8 typical
 
         # Feature cache for backbone skip (bare variables, not a class)
         self._cached_features: list[mx.array] | None = None
         self._cached_frame_idx: int = -1
+
+        # EMA state (output-space blending)
+        self._prev_alpha: np.ndarray | None = None
+        self._prev_fg: np.ndarray | None = None
 
         # Set video-appropriate cache limit
         mx.set_cache_limit(VIDEO_CACHE_LIMIT_BYTES)
@@ -245,9 +251,11 @@ class VideoProcessor:
         if self.async_save and self.output_dir is not None:
             save_executor = ThreadPoolExecutor(max_workers=1)
 
-        # Reset feature cache for this video
+        # Reset state for this video
         self._cached_features = None
         self._cached_frame_idx = -1
+        self._prev_alpha = None
+        self._prev_fg = None
 
         try:
             for frame_idx in range(num_frames):
@@ -272,6 +280,18 @@ class VideoProcessor:
                 # --- Postprocess ---
                 alpha_f32 = np.array(outputs["alpha_final"][0, :, :, 0])
                 fg_f32 = np.array(outputs["fg_final"][0])
+
+                # --- EMA temporal blending (output-space) ---
+                if self.ema_alpha is not None and self._prev_alpha is not None:
+                    a = self.ema_alpha
+                    alpha_f32 = a * alpha_f32 + (1.0 - a) * self._prev_alpha
+                    fg_f32 = a * fg_f32 + (1.0 - a) * self._prev_fg
+
+                if self.ema_alpha is not None:
+                    # Store pre-clip float32 for next frame's blending
+                    self._prev_alpha = alpha_f32.copy()
+                    self._prev_fg = fg_f32.copy()
+
                 alpha_u8 = (np.clip(alpha_f32, 0.0, 1.0) * 255.0).astype(np.uint8)
                 fg_u8 = (np.clip(fg_f32, 0.0, 1.0) * 255.0).astype(np.uint8)
 

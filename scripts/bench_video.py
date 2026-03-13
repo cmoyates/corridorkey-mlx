@@ -233,8 +233,9 @@ def _run_benchmark(
     args: argparse.Namespace,
     skip: int,
     save_reference: bool,
+    ema_alpha: float | None = None,
 ) -> dict[str, object]:
-    """Run a single benchmark pass with given skip interval."""
+    """Run a single benchmark pass with given skip interval and optional EMA."""
     out_dir = REFERENCE_DIR if save_reference else None
     processor = VideoProcessor(
         model=model,  # type: ignore[arg-type]
@@ -242,9 +243,15 @@ def _run_benchmark(
         output_dir=out_dir,
         async_save=True,
         skip_interval=skip,
+        ema_alpha=ema_alpha,
     )
 
-    label = f"skip={skip}" if skip > 1 else "V0 baseline"
+    parts = []
+    if skip > 1:
+        parts.append(f"skip={skip}")
+    if ema_alpha is not None:
+        parts.append(f"ema={ema_alpha}")
+    label = ", ".join(parts) if parts else "V0 baseline"
     print(f"\nBenchmark run ({label})...")
     results: list[FrameResult] = []
     mx.reset_peak_memory()
@@ -272,9 +279,18 @@ def _run_benchmark(
     keyframe_times = np.array([r.infer_time_ms for r in results if r.is_keyframe])
     non_keyframe_times = np.array([r.infer_time_ms for r in results if not r.is_keyframe])
 
+    # Build experiment name
+    exp_parts = []
+    if skip > 1:
+        exp_parts.append(f"skip-{skip}")
+    if ema_alpha is not None:
+        exp_parts.append(f"ema-{ema_alpha}")
+    experiment_name = f"video-{'_'.join(exp_parts)}" if exp_parts else "video-v0-baseline"
+
     metrics: dict[str, object] = {
-        "experiment": f"video-v2-skip-{skip}" if skip > 1 else "video-v0-baseline",
+        "experiment": experiment_name,
         "skip_interval": skip,
+        "ema_alpha": ema_alpha,
         "img_size": args.img_size,
         "num_frames": num_frames,
         "total_wall_clock_s": round(total_wall_s, 3),
@@ -380,6 +396,14 @@ def main() -> None:
     parser.add_argument(
         "--no-save-reference", action="store_true", help="Skip saving V0 reference outputs"
     )
+    parser.add_argument(
+        "--ema-alpha", type=float, default=None,
+        help="EMA blending coefficient (0.6-0.8 typical, None=disabled)",
+    )
+    parser.add_argument(
+        "--ema-sweep", type=float, nargs="+", metavar="A",
+        help="Sweep EMA alpha values (e.g. --ema-sweep 0.6 0.7 0.8)",
+    )
     args = parser.parse_args()
 
     for p, name in [(args.input, "Input"), (args.hint, "Hint"), (args.checkpoint, "Checkpoint")]:
@@ -401,24 +425,28 @@ def main() -> None:
         if i + 1 >= WARMUP_FRAMES:
             break
 
-    # Determine skip intervals to run
+    # Determine skip intervals and EMA alphas to run
     skip_intervals = args.sweep if args.sweep else [args.skip]
+    ema_alphas: list[float | None] = (
+        [*args.ema_sweep] if args.ema_sweep else [args.ema_alpha]
+    )
 
     all_metrics: list[dict[str, object]] = []
     for skip in skip_intervals:
-        save_ref = (skip == 1) and not args.no_save_reference
-        metrics = _run_benchmark(model, args, skip, save_reference=save_ref)
-        metrics["load_time_s"] = round(load_time_s, 2)
-        all_metrics.append(metrics)
+        for ema_alpha in ema_alphas:
+            save_ref = (skip == 1 and ema_alpha is None) and not args.no_save_reference
+            metrics = _run_benchmark(
+                model, args, skip, save_reference=save_ref, ema_alpha=ema_alpha,
+            )
+            metrics["load_time_s"] = round(load_time_s, 2)
+            all_metrics.append(metrics)
 
-        # Save individual artifact
-        if skip == 1:
-            artifact_path = ARTIFACT_DIR / "video_baseline.json"
-        else:
-            artifact_path = ARTIFACT_DIR / f"video_v2_skip{skip}.json"
-        artifact_path.parent.mkdir(parents=True, exist_ok=True)
-        artifact_path.write_text(json.dumps(metrics, indent=2) + "\n")
-        print(f"Saved: {artifact_path}")
+            # Save individual artifact
+            artifact_name = metrics["experiment"]
+            artifact_path = ARTIFACT_DIR / f"{artifact_name}.json"
+            artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            artifact_path.write_text(json.dumps(metrics, indent=2) + "\n")
+            print(f"Saved: {artifact_path}")
 
     # Summary table for sweeps
     if len(all_metrics) > 1:
