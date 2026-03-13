@@ -12,6 +12,11 @@
 
 All fidelity checks are pass/fail. Any failure = hard reject.
 
+### Tier 1 — Precision/numerical changes (FP16, BF16, quantization, compilation)
+
+Max absolute error per tensor vs golden reference. Appropriate when the optimization
+changes numerical precision but not the algorithm (same operations, different dtypes).
+
 | Check | Threshold | Source |
 |-------|-----------|--------|
 | alpha_final max abs error vs golden | < 5e-3 | compare_reference.py |
@@ -21,6 +26,24 @@ All fidelity checks are pass/fail. Any failure = hard reject.
 | delta_logits max abs error vs golden | < 5e-3 | compare_reference.py |
 | Output NaN/Inf check | none | smoke_2048.py |
 | Alpha not all-zero or all-one | varies | smoke_2048.py |
+
+### Tier 2 — Algorithmic/temporal changes (feature reuse, interpolation, EMA, skip)
+
+Perceptual metrics for changes that alter the computation path. Max-abs breaks down
+when errors concentrate at motion boundaries (e.g., skip2 had 0.996 max_abs but was
+fine on static frames). Separate alpha/fg thresholds — alpha is 2-5x more sensitive.
+
+| Check | Threshold | Source |
+|-------|-----------|--------|
+| alpha PSNR vs full-pipeline | > 30 dB | TBD |
+| fg PSNR vs full-pipeline | > 28 dB | TBD |
+| alpha SSIM vs full-pipeline | > 0.95 | TBD |
+| dtSSD (temporal coherence) | < 2.0 | TBD |
+| Output NaN/Inf check | none | smoke_2048.py |
+| Alpha not all-zero or all-one | varies | smoke_2048.py |
+
+**Note:** Tier 2 thresholds are provisional — deep research in progress to calibrate
+against production VFX standards. PSNR/SSIM measured per-frame; dtSSD across frame pairs.
 
 ## Dataset / fixture expectations
 
