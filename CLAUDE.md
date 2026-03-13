@@ -84,6 +84,7 @@ uv run ty check              # type check
 6. All results go to structured JSON, not free-form logs
 
 ### Experiment tracking
+- Project board: https://github.com/users/cmoyates/projects/2 — Tier field = priority (0=highest)
 - Experiments are tracked as GitHub issues on `cmoyates/corridorkey-mlx`
 - Before starting an experiment, check issues for existing context and related work
 - New experiment ideas → create a GitHub issue with hypothesis, approach, and expected impact
