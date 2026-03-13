@@ -39,11 +39,12 @@
 
 ## What To Do Next
 
-### V3: Adaptive refiner tile skip (next priority)
-- Refiner is ~40% of frame time. Skip refiner on tiles with high-confidence alpha (near 0 or 1)
-- Only refine boundary/semi-transparent tiles
-- Pure compute reduction — no temporal artifacts
-- Needs tile-level confidence scoring from coarse alpha output
+### V3: Adaptive refiner tile skip (INCONCLUSIVE — exp #46)
+- Implemented: skip logic works, zero additional error for skipped tiles
+- At tile_size=1024 on 2048: 0% skip (subject in all quadrants)
+- At tile_size=512 on 2048: 33% skip, 8% faster — but GroupNorm tiling artifact fails fidelity
+- Root cause: GroupNorm spatial stats diverge per tile → boundary artifacts
+- **Next:** GroupNorm-aware tiling (frozen stats). See `handoff-2026-03-13-v3-groupnorm-tiling.md`
 
 ### V4: Partial feature reuse (big win if viable)
 From deep research — confirmed viable strategy for our 4ch input blocker:

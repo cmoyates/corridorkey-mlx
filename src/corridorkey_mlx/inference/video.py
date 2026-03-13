@@ -48,6 +48,8 @@ class FrameResult:
     save_time_ms: float  # PNG save (0 if not saving)
     peak_memory_mb: float  # mx.metal.get_peak_memory at this frame
     is_keyframe: bool = True  # True if backbone ran this frame
+    tiles_skipped: int = 0  # refiner tiles skipped (V3 adaptive)
+    tiles_total: int = 0  # total refiner tiles this frame
 
 
 def _read_video_frame_cv2(cap: Any, frame_idx: int) -> np.ndarray:
@@ -340,6 +342,9 @@ class VideoProcessor:
                 if is_keyframe:
                     self._cached_frame_idx = frame_idx
 
+                # Read tile skip stats before deleting outputs
+                tiles_skipped, tiles_total = self.model.tile_skip_stats
+
                 del outputs, x
                 peak_mb = mx.get_peak_memory() / 1e6
 
@@ -371,6 +376,8 @@ class VideoProcessor:
                     save_time_ms=save_ms,
                     peak_memory_mb=peak_mb,
                     is_keyframe=is_keyframe,
+                    tiles_skipped=tiles_skipped,
+                    tiles_total=tiles_total,
                 )
         finally:
             if save_future is not None:

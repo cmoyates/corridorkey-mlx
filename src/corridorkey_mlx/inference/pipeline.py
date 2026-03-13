@@ -47,6 +47,9 @@ def load_model(
     cache_limit_bytes: int | None = CACHE_LIMIT_BYTES,
     backbone_bf16_stages123: bool = True,
     decoder_dtype: mx.Dtype | None = mx.bfloat16,
+    refiner_skip_confidence: float | None = None,
+    refiner_tile_size: int | None = 1024,
+    refiner_frozen_gn: bool = False,
 ) -> GreenFormer:
     """Build GreenFormer and load weights from safetensors checkpoint.
 
@@ -90,6 +93,9 @@ def load_model(
         refiner_dtype=refiner_dtype,
         backbone_bf16_stages123=backbone_bf16_stages123,
         decoder_dtype=decoder_dtype,
+        refiner_skip_confidence=refiner_skip_confidence,
+        refiner_tile_size=refiner_tile_size,
+        refiner_frozen_gn=refiner_frozen_gn,
     )
     model.load_checkpoint(checkpoint)
     if compile:

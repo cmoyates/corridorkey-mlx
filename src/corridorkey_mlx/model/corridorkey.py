@@ -48,6 +48,8 @@ class GreenFormer(nn.Module):
         quantize_backbone_stages: bool = True,
         backbone_bf16_stages123: bool = True,
         decoder_dtype: mx.Dtype | None = mx.bfloat16,
+        refiner_skip_confidence: float | None = None,
+        refiner_frozen_gn: bool = False,
     ) -> None:
         super().__init__()
         self._compute_dtype = dtype
@@ -63,6 +65,10 @@ class GreenFormer(nn.Module):
         self._compile_forward = compile_forward
         self._refiner_tile_size = refiner_tile_size
         self._decoder_dtype = decoder_dtype
+        self._refiner_skip_confidence = refiner_skip_confidence
+        self._refiner_frozen_gn = refiner_frozen_gn
+        self._tiles_skipped = 0  # diagnostic counter, reset per forward
+        self._tiles_total = 0
         self.backbone = HieraBackbone(
             img_size=img_size, use_sdpa=use_sdpa, bf16_stages123=backbone_bf16_stages123
         )
@@ -85,6 +91,11 @@ class GreenFormer(nn.Module):
         self._logit_upsampler = nn.Upsample(
             scale_factor=(4.0, 4.0), mode="linear", align_corners=False
         )
+
+    @property
+    def tile_skip_stats(self) -> tuple[int, int]:
+        """(tiles_skipped, tiles_total) from last _refiner_tiled call."""
+        return self._tiles_skipped, self._tiles_total
 
     @property
     def compiled(self) -> bool:
@@ -236,9 +247,7 @@ class GreenFormer(nn.Module):
             "fg_coarse": fg_coarse,
         }
 
-    def run_refiner(
-        self, x: mx.array, coarse: dict[str, mx.array]
-    ) -> dict[str, mx.array]:
+    def run_refiner(self, x: mx.array, coarse: dict[str, mx.array]) -> dict[str, mx.array]:
         """Run refiner on fresh RGB + coarse predictions from decoders.
 
         Produces final alpha and foreground via additive residual in logit
@@ -404,19 +413,75 @@ class GreenFormer(nn.Module):
 
         Tiles overlap by 32px (refiner receptive field radius = 31px) to
         ensure exact equivalence with full-image processing.
+
+        When refiner_skip_confidence is set, tiles where coarse alpha is
+        uniformly confident (all near 0 or all near 1) are skipped — the
+        refiner delta is zero, so final = coarse for those regions.
+
+        When refiner_frozen_gn is enabled, precomputes GroupNorm stats on
+        the full image before tiling so per-tile stats match full-image.
         """
         ts = self._refiner_tile_size
         assert ts is not None
         overlap = 32  # RF radius: stem(1) + res1(2) + res2(4) + res3(8) + res4(16) = 31
         H = rgb.shape[1]
         W = rgb.shape[2]
+        skip_thresh = self._refiner_skip_confidence
 
+        # Frozen GroupNorm: collect full-image stats, then freeze for tiled pass
+        if self._refiner_frozen_gn:
+            self.refiner.collect_groupnorm_stats(rgb, coarse)
+            self.refiner.freeze_groupnorm_stats()
+            # Bypass compiled refiner — compiled graph doesn't see frozen stats
+            refiner_fn = self.refiner
+
+        self._tiles_skipped = 0
+        self._tiles_total = 0
+
+        try:
+            return self._refiner_tile_loop(refiner_fn, rgb, coarse, ts, overlap, H, W, skip_thresh)
+        finally:
+            if self._refiner_frozen_gn:
+                self.refiner.unfreeze_groupnorm_stats()
+
+    def _refiner_tile_loop(
+        self,
+        refiner_fn: object,
+        rgb: mx.array,
+        coarse: mx.array,
+        ts: int,
+        overlap: int,
+        H: int,
+        W: int,
+        skip_thresh: float | None,
+    ) -> mx.array:
+        """Inner tile loop — extracted for try/finally clarity."""
         tile_rows: list[mx.array] = []
         y = 0
         while y < H:
             tile_cols: list[mx.array] = []
             x = 0
             while x < W:
+                own_h = min(ts, H - y)
+                own_w = min(ts, W - x)
+                self._tiles_total += 1
+
+                # Adaptive skip: check coarse alpha confidence on owned region
+                if skip_thresh is not None:
+                    tile_alpha = coarse[:, y : y + own_h, x : x + own_w, 0]
+                    # Materialize min/max for the branch decision
+                    alpha_min = mx.min(tile_alpha)
+                    alpha_max = mx.max(tile_alpha)
+                    # mx.eval: MLX array materialization (not Python eval)
+                    mx.eval(alpha_min, alpha_max)  # noqa: S307
+                    if float(alpha_max) < skip_thresh or float(alpha_min) > (1.0 - skip_thresh):
+                        # Tile is uniformly confident — refiner delta = 0
+                        zeros = mx.zeros((rgb.shape[0], own_h, own_w, 4), dtype=rgb.dtype)
+                        tile_cols.append(zeros)
+                        self._tiles_skipped += 1
+                        x += ts
+                        continue
+
                 # Extract tile with overlap padding (clamped to image bounds)
                 y0 = max(0, y - overlap)
                 x0 = max(0, x - overlap)
@@ -431,15 +496,12 @@ class GreenFormer(nn.Module):
                 # Crop to owned region (remove overlap padding)
                 own_y = y - y0
                 own_x = x - x0
-                own_h = min(ts, H - y)
-                own_w = min(ts, W - x)
                 cropped = delta_tile[:, own_y : own_y + own_h, own_x : own_x + own_w, :]
                 # Materialize cropped tile and discard full delta_tile so MLX
                 # can free the im2col buffers (~9x activation inflation from
-                # dilated convolutions) before the next tile starts.  This
-                # reduces peak memory overlap between tiles.
-                # NOTE: mx.eval is MLX array materialization, not Python eval()
-                mx.eval(cropped)  # noqa: S307  -- mx.eval, not Python eval()
+                # dilated convolutions) before the next tile starts.
+                # mx.eval: MLX array materialization (not Python eval)
+                mx.eval(cropped)  # noqa: S307
                 del delta_tile
                 tile_cols.append(cropped)
                 x += ts

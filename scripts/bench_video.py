@@ -73,10 +73,14 @@ def _compute_ssim(img1: np.ndarray, img2: np.ndarray, win_size: int = 11) -> flo
 
     if img1.ndim == 3:
         # Per-channel SSIM, averaged
-        return float(np.mean([
-            _compute_ssim(img1[:, :, ch], img2[:, :, ch], win_size)
-            for ch in range(img1.shape[2])
-        ]))
+        return float(
+            np.mean(
+                [
+                    _compute_ssim(img1[:, :, ch], img2[:, :, ch], win_size)
+                    for ch in range(img1.shape[2])
+                ]
+            )
+        )
 
     mu1 = _uniform_filter_2d(img1, win_size)
     mu2 = _uniform_filter_2d(img2, win_size)
@@ -128,9 +132,7 @@ def _load_reference_frame(ref_dir: Path, frame_idx: int, key: str) -> np.ndarray
     return img
 
 
-def _compute_fidelity(
-    results: list[FrameResult], ref_dir: Path
-) -> dict[str, object]:
+def _compute_fidelity(results: list[FrameResult], ref_dir: Path) -> dict[str, object]:
     """Compare per-frame outputs against V0 reference.
 
     Returns Tier 1 (max_abs) and Tier 2 (PSNR/SSIM/dtSSD) metrics.
@@ -173,12 +175,14 @@ def _compute_fidelity(
 
         max_err = max(alpha_err, fg_err)
         if max_err > FIDELITY_THRESHOLD:
-            failed_frames.append({
-                "frame": r.frame_idx,
-                "alpha_err": round(alpha_err, 6),
-                "fg_err": round(fg_err, 6),
-                "is_keyframe": r.is_keyframe,
-            })
+            failed_frames.append(
+                {
+                    "frame": r.frame_idx,
+                    "alpha_err": round(alpha_err, 6),
+                    "fg_err": round(fg_err, 6),
+                    "is_keyframe": r.is_keyframe,
+                }
+            )
 
     alpha_arr = np.array(alpha_errors)
     fg_arr = np.array(fg_errors)
@@ -238,8 +242,12 @@ def _run_benchmark(
     save_reference: bool,
     ema_alpha: float | None = None,
     async_decode: bool = False,
+    tile_skip_threshold: float | None = None,
 ) -> dict[str, object]:
     """Run a single benchmark pass with given skip interval and optional EMA."""
+    # Set tile skip confidence on model (runtime toggle, no reload needed)
+    model._refiner_skip_confidence = tile_skip_threshold  # type: ignore[attr-defined]
+
     out_dir = REFERENCE_DIR if save_reference else None
     processor = VideoProcessor(
         model=model,  # type: ignore[arg-type]
@@ -258,6 +266,8 @@ def _run_benchmark(
         parts.append(f"ema={ema_alpha}")
     if async_decode:
         parts.append("async")
+    if tile_skip_threshold is not None:
+        parts.append(f"tileskip={tile_skip_threshold}")
     label = ", ".join(parts) if parts else "V0 baseline"
     print(f"\nBenchmark run ({label})...")
     results: list[FrameResult] = []
@@ -268,11 +278,14 @@ def _run_benchmark(
         results.append(result)
         if result.frame_idx in {0, 10, 20, 30, 36}:
             kf = "K" if result.is_keyframe else " "
+            skip_str = ""
+            if result.tiles_total > 0:
+                skip_str = f"  tiles={result.tiles_skipped}/{result.tiles_total}"
             print(
                 f"  [{kf}] Frame {result.frame_idx:3d}: "
                 f"infer={result.infer_time_ms:5.1f}ms  "
                 f"decode={result.decode_time_ms:5.1f}ms  "
-                f"peak_mem={result.peak_memory_mb:.0f}MB"
+                f"peak_mem={result.peak_memory_mb:.0f}MB{skip_str}"
             )
 
     total_wall_s = time.perf_counter() - t_start
@@ -286,6 +299,11 @@ def _run_benchmark(
     keyframe_times = np.array([r.infer_time_ms for r in results if r.is_keyframe])
     non_keyframe_times = np.array([r.infer_time_ms for r in results if not r.is_keyframe])
 
+    # Tile skip stats
+    total_tiles_skipped = sum(r.tiles_skipped for r in results)
+    total_tiles = sum(r.tiles_total for r in results)
+    tile_skip_rate = total_tiles_skipped / total_tiles if total_tiles > 0 else 0.0
+
     # Build experiment name
     exp_parts = []
     if skip > 1:
@@ -294,6 +312,8 @@ def _run_benchmark(
         exp_parts.append(f"ema-{ema_alpha}")
     if async_decode:
         exp_parts.append("async")
+    if tile_skip_threshold is not None:
+        exp_parts.append(f"tileskip-{tile_skip_threshold}")
     experiment_name = f"video-{'_'.join(exp_parts)}" if exp_parts else "video-v0-baseline"
 
     metrics: dict[str, object] = {
@@ -301,6 +321,10 @@ def _run_benchmark(
         "skip_interval": skip,
         "ema_alpha": ema_alpha,
         "async_decode": async_decode,
+        "tile_skip_threshold": tile_skip_threshold,
+        "tile_skip_rate": round(tile_skip_rate, 3),
+        "tiles_skipped": total_tiles_skipped,
+        "tiles_total": total_tiles,
         "img_size": args.img_size,
         "num_frames": num_frames,
         "total_wall_clock_s": round(total_wall_s, 3),
@@ -367,6 +391,8 @@ def _run_benchmark(
         print(f"Non-keyframe median:   {inf['non_keyframe_median_ms']}ms")  # type: ignore[index]
     print(f"Backbone hit rate:     {metrics['backbone_hit_rate']}")
     print(f"Peak memory:           {metrics['memory']['peak_mb']}MB")  # type: ignore[index]
+    if total_tiles > 0:
+        print(f"Tile skip rate:        {total_tiles_skipped}/{total_tiles} ({tile_skip_rate:.1%})")
     print(f"Thermal drift:         {metrics['thermal']['drift_pct']}%")  # type: ignore[index]
 
     if "fidelity" in metrics:
@@ -400,23 +426,56 @@ def main() -> None:
     parser.add_argument("--img-size", type=int, default=DEFAULT_IMG_SIZE)
     parser.add_argument("--skip", type=int, default=1, help="Backbone skip interval")
     parser.add_argument(
-        "--sweep", type=int, nargs="+", metavar="N",
+        "--sweep",
+        type=int,
+        nargs="+",
+        metavar="N",
         help="Sweep multiple skip intervals (e.g. --sweep 2 3 5)",
     )
     parser.add_argument(
         "--no-save-reference", action="store_true", help="Skip saving V0 reference outputs"
     )
     parser.add_argument(
-        "--ema-alpha", type=float, default=None,
+        "--ema-alpha",
+        type=float,
+        default=None,
         help="EMA blending coefficient (0.6-0.8 typical, None=disabled)",
     )
     parser.add_argument(
-        "--ema-sweep", type=float, nargs="+", metavar="A",
+        "--ema-sweep",
+        type=float,
+        nargs="+",
+        metavar="A",
         help="Sweep EMA alpha values (e.g. --ema-sweep 0.6 0.7 0.8)",
     )
     parser.add_argument(
-        "--async-decode", action="store_true",
+        "--async-decode",
+        action="store_true",
         help="V2: overlap frame decode (CPU) with GPU inference",
+    )
+    parser.add_argument(
+        "--tile-skip-threshold",
+        type=float,
+        default=None,
+        help="V3: skip refiner tiles w/ confident alpha (0.02 = skip <0.02 or >0.98)",
+    )
+    parser.add_argument(
+        "--tile-skip-sweep",
+        type=float,
+        nargs="+",
+        metavar="T",
+        help="Sweep tile skip thresholds (e.g. --tile-skip-sweep 0.01 0.02 0.05)",
+    )
+    parser.add_argument(
+        "--tile-size",
+        type=int,
+        default=1024,
+        help="Refiner tile size in pixels (default 1024)",
+    )
+    parser.add_argument(
+        "--frozen-gn",
+        action="store_true",
+        help="Precompute full-image GroupNorm stats for tiled refiner",
     )
     args = parser.parse_args()
 
@@ -426,9 +485,15 @@ def main() -> None:
             raise SystemExit(1)
 
     # --- Load model ---
-    print(f"Loading model (img_size={args.img_size})...")
+    print(f"Loading model (img_size={args.img_size}, tile_size={args.tile_size})...")
     t0 = time.perf_counter()
-    model = load_model(args.checkpoint, img_size=args.img_size, slim=True)
+    model = load_model(
+        args.checkpoint,
+        img_size=args.img_size,
+        slim=True,
+        refiner_tile_size=args.tile_size,
+        refiner_frozen_gn=args.frozen_gn,
+    )
     load_time_s = time.perf_counter() - t0
     print(f"  Loaded in {load_time_s:.2f}s")
 
@@ -439,30 +504,42 @@ def main() -> None:
         if i + 1 >= WARMUP_FRAMES:
             break
 
-    # Determine skip intervals and EMA alphas to run
+    # Determine skip intervals, EMA alphas, and tile skip thresholds to run
     skip_intervals = args.sweep if args.sweep else [args.skip]
-    ema_alphas: list[float | None] = (
-        [*args.ema_sweep] if args.ema_sweep else [args.ema_alpha]
+    ema_alphas: list[float | None] = [*args.ema_sweep] if args.ema_sweep else [args.ema_alpha]
+    tile_skip_thresholds: list[float | None] = (
+        [*args.tile_skip_sweep] if args.tile_skip_sweep else [args.tile_skip_threshold]
     )
 
     all_metrics: list[dict[str, object]] = []
     for skip in skip_intervals:
         for ema_alpha in ema_alphas:
-            is_vanilla = skip == 1 and ema_alpha is None and not args.async_decode
-            save_ref = is_vanilla and not args.no_save_reference
-            metrics = _run_benchmark(
-                model, args, skip, save_reference=save_ref,
-                ema_alpha=ema_alpha, async_decode=args.async_decode,
-            )
-            metrics["load_time_s"] = round(load_time_s, 2)
-            all_metrics.append(metrics)
+            for tile_skip_thresh in tile_skip_thresholds:
+                is_vanilla = (
+                    skip == 1
+                    and ema_alpha is None
+                    and not args.async_decode
+                    and tile_skip_thresh is None
+                )
+                save_ref = is_vanilla and not args.no_save_reference
+                metrics = _run_benchmark(
+                    model,
+                    args,
+                    skip,
+                    save_reference=save_ref,
+                    ema_alpha=ema_alpha,
+                    async_decode=args.async_decode,
+                    tile_skip_threshold=tile_skip_thresh,
+                )
+                metrics["load_time_s"] = round(load_time_s, 2)
+                all_metrics.append(metrics)
 
-            # Save individual artifact
-            artifact_name = metrics["experiment"]
-            artifact_path = ARTIFACT_DIR / f"{artifact_name}.json"
-            artifact_path.parent.mkdir(parents=True, exist_ok=True)
-            artifact_path.write_text(json.dumps(metrics, indent=2) + "\n")
-            print(f"Saved: {artifact_path}")
+                # Save individual artifact
+                artifact_name = metrics["experiment"]
+                artifact_path = ARTIFACT_DIR / f"{artifact_name}.json"
+                artifact_path.parent.mkdir(parents=True, exist_ok=True)
+                artifact_path.write_text(json.dumps(metrics, indent=2) + "\n")
+                print(f"Saved: {artifact_path}")
 
     # Summary table for sweeps
     if len(all_metrics) > 1:
@@ -470,18 +547,17 @@ def main() -> None:
         print("SWEEP SUMMARY")
         print(f"{'=' * 90}")
         print(
-            f"{'Skip':>6} {'FPS':>6} {'Median':>8} {'NonKF':>8} "
-            f"{'HitRate':>8} {'αPSNR':>7} {'SSIM':>6} {'dtSSD':>6} {'Gate':>6}"
+            f"{'Skip':>6} {'TSkip':>7} {'FPS':>6} {'Median':>8} "
+            f"{'αPSNR':>7} {'SSIM':>6} {'dtSSD':>6} {'TileRate':>9} {'Gate':>6}"
         )
-        print(
-            f"{'':>6} {'':>6} {'(ms)':>8} {'(ms)':>8} "
-            f"{'':>8} {'(dB)':>7} {'':>6} {'':>6} {'':>6}"
-        )
+        print(f"{'':>6} {'':>7} {'':>6} {'(ms)':>8} {'(dB)':>7} {'':>6} {'':>6} {'':>9} {'':>6}")
         print("-" * 90)
         for m in all_metrics:
             inf = m["inference"]
-            nkf = inf["non_keyframe_median_ms"]  # type: ignore[index]
-            nkf_str = f"{nkf}" if nkf is not None else "N/A"
+            tskip = m.get("tile_skip_threshold")
+            tskip_str = f"{tskip}" if tskip is not None else "off"
+            tile_rate = m.get("tile_skip_rate", 0)
+            tile_rate_str = f"{tile_rate:.1%}" if tile_rate > 0 else "0%"
             if "fidelity" in m:
                 fid = m["fidelity"]
                 gate = "PASS" if fid["passed"] else "FAIL"  # type: ignore[index]
@@ -492,13 +568,13 @@ def main() -> None:
                 gate, psnr_str, ssim_str, dtssd_str = "N/A", "N/A", "N/A", "N/A"
             print(
                 f"{m['skip_interval']:>6} "
+                f"{tskip_str:>7} "
                 f"{m['effective_fps']:>6} "
                 f"{inf['median_ms']:>8} "  # type: ignore[index]
-                f"{nkf_str:>8} "
-                f"{m['backbone_hit_rate']:>8} "
                 f"{psnr_str:>7} "
                 f"{ssim_str:>6} "
                 f"{dtssd_str:>6} "
+                f"{tile_rate_str:>9} "
                 f"{gate:>6}"
             )
 
