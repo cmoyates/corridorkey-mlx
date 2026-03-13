@@ -32,6 +32,88 @@ ARTIFACT_DIR = Path("research/artifacts")
 WARMUP_FRAMES = 3
 FIDELITY_THRESHOLD = 5e-3
 
+# Tier 2 thresholds (from benchmark_spec.md)
+TIER2_ALPHA_PSNR_MIN = 35.0  # dB
+TIER2_FG_PSNR_MIN = 33.0  # dB
+TIER2_SSIM_MIN = 0.97
+TIER2_DTSSD_MAX = 1.5
+
+
+def _uniform_filter_2d(img: np.ndarray, size: int) -> np.ndarray:
+    """Fast 2D uniform (box) filter via cumulative sums. No scipy needed."""
+    pad = size // 2
+    padded = np.pad(img, pad, mode="reflect")
+    # Cumsum rows
+    cs = np.cumsum(padded, axis=0)
+    cs = cs[size:] - cs[:-size]
+    # Cumsum cols
+    cs = np.cumsum(cs, axis=1)
+    cs = cs[:, size:] - cs[:, :-size]
+    return cs / (size * size)
+
+
+def _compute_psnr(img1: np.ndarray, img2: np.ndarray) -> float:
+    """PSNR between two float32 images in [0,1]. Returns dB (inf if identical)."""
+    mse = float(np.mean((img1 - img2) ** 2))
+    if mse < 1e-12:
+        return float("inf")
+    return 10.0 * np.log10(1.0 / mse)
+
+
+def _compute_ssim(img1: np.ndarray, img2: np.ndarray, win_size: int = 11) -> float:
+    """Windowed SSIM (Wang et al. 2004) for 2D float32 images in [0,1].
+
+    For multi-channel images, computes per-channel then averages.
+    """
+    c1 = 0.01**2
+    c2 = 0.03**2
+
+    if img1.ndim == 3:
+        # Per-channel SSIM, averaged
+        return float(np.mean([
+            _compute_ssim(img1[:, :, ch], img2[:, :, ch], win_size)
+            for ch in range(img1.shape[2])
+        ]))
+
+    mu1 = _uniform_filter_2d(img1, win_size)
+    mu2 = _uniform_filter_2d(img2, win_size)
+    mu1_sq = mu1 * mu1
+    mu2_sq = mu2 * mu2
+    mu12 = mu1 * mu2
+
+    sigma1_sq = _uniform_filter_2d(img1 * img1, win_size) - mu1_sq
+    sigma2_sq = _uniform_filter_2d(img2 * img2, win_size) - mu2_sq
+    sigma12 = _uniform_filter_2d(img1 * img2, win_size) - mu12
+
+    num = (2.0 * mu12 + c1) * (2.0 * sigma12 + c2)
+    den = (mu1_sq + mu2_sq + c1) * (sigma1_sq + sigma2_sq + c2)
+    ssim_map = num / den
+    return float(np.mean(ssim_map))
+
+
+def _compute_dtssd(
+    candidate_frames: list[np.ndarray],
+    reference_frames: list[np.ndarray],
+) -> float:
+    """Temporal coherence metric (dtSSD).
+
+    dtSSD = mean over consecutive pairs of:
+        mean(||(c_t - c_{t-1}) - (r_t - r_{t-1})||)
+
+    Lower = more temporally consistent with reference.
+    Operates on alpha channel (2D float32 [0,1]).
+    """
+    if len(candidate_frames) < 2:
+        return 0.0
+    dtssd_values: list[float] = []
+    for i in range(1, len(candidate_frames)):
+        cand_diff = candidate_frames[i] - candidate_frames[i - 1]
+        ref_diff = reference_frames[i] - reference_frames[i - 1]
+        # Per-pixel absolute difference of temporal derivatives, spatially averaged
+        frame_dtssd = float(np.mean(np.abs(cand_diff - ref_diff)) * 255.0)
+        dtssd_values.append(frame_dtssd)
+    return float(np.mean(dtssd_values))
+
 
 def _load_reference_frame(ref_dir: Path, frame_idx: int, key: str) -> np.ndarray:
     """Load a V0 reference PNG as float32 [0,1]."""
@@ -46,23 +128,45 @@ def _load_reference_frame(ref_dir: Path, frame_idx: int, key: str) -> np.ndarray
 def _compute_fidelity(
     results: list[FrameResult], ref_dir: Path
 ) -> dict[str, object]:
-    """Compare per-frame outputs against V0 reference. Returns fidelity metrics."""
+    """Compare per-frame outputs against V0 reference.
+
+    Returns Tier 1 (max_abs) and Tier 2 (PSNR/SSIM/dtSSD) metrics.
+    """
     alpha_errors: list[float] = []
     fg_errors: list[float] = []
+    alpha_psnrs: list[float] = []
+    fg_psnrs: list[float] = []
+    alpha_ssims: list[float] = []
     failed_frames: list[dict[str, object]] = []
+
+    # Collect frames for dtSSD (alpha only — most sensitive channel)
+    candidate_alpha_frames: list[np.ndarray] = []
+    reference_alpha_frames: list[np.ndarray] = []
 
     for r in results:
         # Alpha: (H, W) uint8 -> float32
         alpha_f32 = r.alpha.astype(np.float32) / 255.0
         ref_alpha = _load_reference_frame(ref_dir, r.frame_idx, "alpha")
+
+        # Tier 1: max abs error
         alpha_err = float(np.max(np.abs(alpha_f32 - ref_alpha)))
         alpha_errors.append(alpha_err)
+
+        # Tier 2: PSNR, SSIM
+        alpha_psnrs.append(_compute_psnr(alpha_f32, ref_alpha))
+        alpha_ssims.append(_compute_ssim(alpha_f32, ref_alpha))
+
+        # Collect for dtSSD
+        candidate_alpha_frames.append(alpha_f32)
+        reference_alpha_frames.append(ref_alpha)
 
         # FG: (H, W, 3) uint8 -> float32
         fg_f32 = r.fg.astype(np.float32) / 255.0
         ref_fg = _load_reference_frame(ref_dir, r.frame_idx, "fg")
+
         fg_err = float(np.max(np.abs(fg_f32 - ref_fg)))
         fg_errors.append(fg_err)
+        fg_psnrs.append(_compute_psnr(fg_f32, ref_fg))
 
         max_err = max(alpha_err, fg_err)
         if max_err > FIDELITY_THRESHOLD:
@@ -76,7 +180,26 @@ def _compute_fidelity(
     alpha_arr = np.array(alpha_errors)
     fg_arr = np.array(fg_errors)
 
+    # Tier 2: dtSSD (temporal coherence on alpha)
+    dtssd = _compute_dtssd(candidate_alpha_frames, reference_alpha_frames)
+
+    # Filter out inf PSNR values for stats (identical frames → inf)
+    finite_alpha_psnrs = [p for p in alpha_psnrs if np.isfinite(p)]
+    finite_fg_psnrs = [p for p in fg_psnrs if np.isfinite(p)]
+    alpha_psnr_min = float(min(alpha_psnrs)) if alpha_psnrs else 0.0
+    fg_psnr_min = float(min(fg_psnrs)) if fg_psnrs else 0.0
+    alpha_ssim_min = float(min(alpha_ssims)) if alpha_ssims else 0.0
+
+    # Tier 2 pass/fail
+    tier2_passed = (
+        alpha_psnr_min >= TIER2_ALPHA_PSNR_MIN
+        and fg_psnr_min >= TIER2_FG_PSNR_MIN
+        and alpha_ssim_min >= TIER2_SSIM_MIN
+        and dtssd <= TIER2_DTSSD_MAX
+    )
+
     return {
+        # Tier 1 (precision)
         "alpha_max_abs": round(float(np.max(alpha_arr)), 6),
         "alpha_mean_abs": round(float(np.mean(alpha_arr)), 6),
         "alpha_p95_abs": round(float(np.percentile(alpha_arr, 95)), 6),
@@ -84,9 +207,24 @@ def _compute_fidelity(
         "fg_mean_abs": round(float(np.mean(fg_arr)), 6),
         "fg_p95_abs": round(float(np.percentile(fg_arr, 95)), 6),
         "threshold": FIDELITY_THRESHOLD,
-        "passed": len(failed_frames) == 0,
+        "tier1_passed": len(failed_frames) == 0,
         "failed_frame_count": len(failed_frames),
-        "failed_frames": failed_frames[:10],  # cap for readability
+        "failed_frames": failed_frames[:10],
+        # Tier 2 (perceptual/temporal)
+        "alpha_psnr_min_db": round(alpha_psnr_min, 2),
+        "alpha_psnr_mean_db": round(
+            float(np.mean(finite_alpha_psnrs)) if finite_alpha_psnrs else float("inf"), 2
+        ),
+        "fg_psnr_min_db": round(fg_psnr_min, 2),
+        "fg_psnr_mean_db": round(
+            float(np.mean(finite_fg_psnrs)) if finite_fg_psnrs else float("inf"), 2
+        ),
+        "alpha_ssim_min": round(alpha_ssim_min, 4),
+        "alpha_ssim_mean": round(float(np.mean(alpha_ssims)), 4),
+        "dtssd": round(dtssd, 4),
+        "tier2_passed": tier2_passed,
+        # Overall
+        "passed": len(failed_frames) == 0 and tier2_passed,
     }
 
 
@@ -183,9 +321,9 @@ def _run_benchmark(
         },
     }
 
-    # Fidelity comparison against V0 reference (skip>1 only)
-    if skip > 1 and REFERENCE_DIR.exists():
-        print("  Checking fidelity vs V0 reference...")
+    # Fidelity comparison against V0 reference (when reference exists)
+    if REFERENCE_DIR.exists():
+        print("  Computing fidelity vs V0 reference...")
         fidelity = _compute_fidelity(results, REFERENCE_DIR)
         metrics["fidelity"] = fidelity
 
@@ -207,10 +345,18 @@ def _run_benchmark(
 
     if "fidelity" in metrics:
         fid = metrics["fidelity"]
-        status = "PASS" if fid["passed"] else "FAIL"  # type: ignore[index]
-        print(f"Fidelity:              {status}")
-        print(f"  alpha max_abs:       {fid['alpha_max_abs']}")  # type: ignore[index]
-        print(f"  fg max_abs:          {fid['fg_max_abs']}")  # type: ignore[index]
+        t1 = "PASS" if fid["tier1_passed"] else "FAIL"  # type: ignore[index]
+        t2 = "PASS" if fid["tier2_passed"] else "FAIL"  # type: ignore[index]
+        overall = "PASS" if fid["passed"] else "FAIL"  # type: ignore[index]
+        print(f"Fidelity:              {overall}")
+        print(f"  Tier 1 (precision):  {t1}")
+        print(f"    alpha max_abs:     {fid['alpha_max_abs']}")  # type: ignore[index]
+        print(f"    fg max_abs:        {fid['fg_max_abs']}")  # type: ignore[index]
+        print(f"  Tier 2 (perceptual): {t2}")
+        print(f"    alpha PSNR min:    {fid['alpha_psnr_min_db']}dB (>={TIER2_ALPHA_PSNR_MIN})")  # type: ignore[index]
+        print(f"    fg PSNR min:       {fid['fg_psnr_min_db']}dB (>={TIER2_FG_PSNR_MIN})")  # type: ignore[index]
+        print(f"    alpha SSIM min:    {fid['alpha_ssim_min']} (>={TIER2_SSIM_MIN})")  # type: ignore[index]
+        print(f"    dtSSD:             {fid['dtssd']} (<={TIER2_DTSSD_MAX})")  # type: ignore[index]
         if not fid["passed"]:  # type: ignore[index]
             print(f"  failed frames:       {fid['failed_frame_count']}")  # type: ignore[index]
 
@@ -276,26 +422,40 @@ def main() -> None:
 
     # Summary table for sweeps
     if len(all_metrics) > 1:
-        print(f"\n{'=' * 70}")
+        print(f"\n{'=' * 90}")
         print("SWEEP SUMMARY")
-        print(f"{'=' * 70}")
-        print(f"{'Skip':>6} {'FPS':>6} {'Median':>8} {'NonKF':>8} {'HitRate':>8} {'Fidelity':>10}")
-        print(f"{'':>6} {'':>6} {'(ms)':>8} {'(ms)':>8} {'':>8} {'':>10}")
-        print("-" * 70)
+        print(f"{'=' * 90}")
+        print(
+            f"{'Skip':>6} {'FPS':>6} {'Median':>8} {'NonKF':>8} "
+            f"{'HitRate':>8} {'αPSNR':>7} {'SSIM':>6} {'dtSSD':>6} {'Gate':>6}"
+        )
+        print(
+            f"{'':>6} {'':>6} {'(ms)':>8} {'(ms)':>8} "
+            f"{'':>8} {'(dB)':>7} {'':>6} {'':>6} {'':>6}"
+        )
+        print("-" * 90)
         for m in all_metrics:
             inf = m["inference"]
-            fid_status = "N/A"
-            if "fidelity" in m:
-                fid_status = "PASS" if m["fidelity"]["passed"] else "FAIL"  # type: ignore[index]
             nkf = inf["non_keyframe_median_ms"]  # type: ignore[index]
             nkf_str = f"{nkf}" if nkf is not None else "N/A"
+            if "fidelity" in m:
+                fid = m["fidelity"]
+                gate = "PASS" if fid["passed"] else "FAIL"  # type: ignore[index]
+                psnr_str = f"{fid['alpha_psnr_min_db']}"  # type: ignore[index]
+                ssim_str = f"{fid['alpha_ssim_min']}"  # type: ignore[index]
+                dtssd_str = f"{fid['dtssd']}"  # type: ignore[index]
+            else:
+                gate, psnr_str, ssim_str, dtssd_str = "N/A", "N/A", "N/A", "N/A"
             print(
                 f"{m['skip_interval']:>6} "
                 f"{m['effective_fps']:>6} "
                 f"{inf['median_ms']:>8} "  # type: ignore[index]
                 f"{nkf_str:>8} "
                 f"{m['backbone_hit_rate']:>8} "
-                f"{fid_status:>10}"
+                f"{psnr_str:>7} "
+                f"{ssim_str:>6} "
+                f"{dtssd_str:>6} "
+                f"{gate:>6}"
             )
 
 
