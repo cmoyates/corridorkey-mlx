@@ -111,7 +111,7 @@ class CorridorKeyMLXEngine:
             # Tiled: model runs at tile_size, input stays full-res
             self._img_size = self._tile_size
             self._model: GreenFormer = load_model(
-                checkpoint, img_size=self._tile_size, compile=False, slim=True,
+                checkpoint, img_size=self._tile_size, compile=compile, slim=True,
                 backbone_size=backbone_size,
             )
             logger.info(

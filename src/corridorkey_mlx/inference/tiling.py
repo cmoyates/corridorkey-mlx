@@ -7,6 +7,7 @@ then blends results using linear ramp weights in the overlap region.
 from __future__ import annotations
 
 import gc
+import logging
 from typing import TYPE_CHECKING
 
 import mlx.core as mx
@@ -14,6 +15,8 @@ import numpy as np
 
 if TYPE_CHECKING:
     from corridorkey_mlx.model.corridorkey import GreenFormer
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_TILE_SIZE = 512
 DEFAULT_OVERLAP = 128
@@ -121,28 +124,50 @@ def tiled_inference(
     fg_accum = np.zeros((full_h, full_w, 3), dtype=np.float32)
     weight_accum = np.zeros((full_h, full_w, 1), dtype=np.float32)
 
+    # Confidence threshold for tile skipping (alpha hint channel)
+    SKIP_CONFIDENCE = 0.01
+    tiles_skipped = 0
+    tiles_total = len(y_coords) * len(x_coords)
+
     for yi, (y_start, y_end) in enumerate(y_coords):
         for xi, (x_start, x_end) in enumerate(x_coords):
-            tile = x[:, y_start:y_end, x_start:x_end, :]
-
-            # Pad to tile_size if needed (edge tiles may be smaller)
-            pad_h = tile_size - (y_end - y_start)
-            pad_w = tile_size - (x_end - x_start)
-            if pad_h > 0 or pad_w > 0:
-                tile = mx.pad(tile, [(0, 0), (0, pad_h), (0, pad_w), (0, 0)])
-
-            out = model(tile)
-            # NOTE: mx.eval is MLX array materialization, not Python eval()
-            mx.eval(out)  # noqa: S307
-
-            alpha_tile = np.array(out["alpha_final"][0])  # (tile_h, tile_w, 1)
-            fg_tile = np.array(out["fg_final"][0])  # (tile_h, tile_w, 3)
-
-            # Crop padding
             actual_h = y_end - y_start
             actual_w = x_end - x_start
-            alpha_tile = alpha_tile[:actual_h, :actual_w, :]
-            fg_tile = fg_tile[:actual_h, :actual_w, :]
+
+            # Alpha-hint guided tile skipping: check channel 3 (mask) before inference
+            mask_tile = x[0, y_start:y_end, x_start:x_end, 3]
+            mask_min = float(mx.min(mask_tile).item())
+            mask_max = float(mx.max(mask_tile).item())
+
+            if mask_max < SKIP_CONFIDENCE:
+                # Pure background — skip inference, fill zeros
+                alpha_tile = np.zeros((actual_h, actual_w, 1), dtype=np.float32)
+                fg_tile = np.zeros((actual_h, actual_w, 3), dtype=np.float32)
+                tiles_skipped += 1
+            elif mask_min > (1.0 - SKIP_CONFIDENCE):
+                # Pure foreground — skip inference, fill ones + input RGB
+                alpha_tile = np.ones((actual_h, actual_w, 1), dtype=np.float32)
+                fg_tile = np.array(mx.sigmoid(x[0, y_start:y_end, x_start:x_end, :3]))
+                tiles_skipped += 1
+            else:
+                # Mixed content — run full inference
+                tile = x[:, y_start:y_end, x_start:x_end, :]
+
+                # Pad to tile_size if needed (edge tiles may be smaller)
+                pad_h = tile_size - actual_h
+                pad_w = tile_size - actual_w
+                if pad_h > 0 or pad_w > 0:
+                    tile = mx.pad(tile, [(0, 0), (0, pad_h), (0, pad_w), (0, 0)])
+
+                out = model(tile)
+                mx.eval(out)  # materialize MLX arrays  # noqa: S307
+
+                alpha_tile = np.array(out["alpha_final"][0])
+                fg_tile = np.array(out["fg_final"][0])
+
+                # Crop padding
+                alpha_tile = alpha_tile[:actual_h, :actual_w, :]
+                fg_tile = fg_tile[:actual_h, :actual_w, :]
 
             # Blend weights
             position = (
@@ -159,9 +184,12 @@ def tiled_inference(
             weight_accum[y_start:y_end, x_start:x_end, :] += w3d
 
             # Deterministic memory cleanup — release MLX graph refs between tiles
-            del out, tile, alpha_tile, fg_tile, w, w3d
+            del alpha_tile, fg_tile, w, w3d
             gc.collect()
             mx.clear_cache()
+
+    if tiles_skipped > 0:
+        logger.debug("Tiles skipped: %d/%d (%.0f%%)", tiles_skipped, tiles_total, 100.0 * tiles_skipped / tiles_total)
 
     # Normalize by accumulated weights
     weight_accum = np.maximum(weight_accum, 1e-8)
