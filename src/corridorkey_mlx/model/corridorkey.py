@@ -6,6 +6,7 @@ All internal operations use NHWC layout.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import mlx.core as mx
@@ -449,7 +450,7 @@ class GreenFormer(nn.Module):
 
     def _refiner_tiled(
         self,
-        refiner_fn: object,
+        refiner_fn: Callable[..., mx.array],
         rgb: mx.array,
         coarse: mx.array,
     ) -> mx.array:
@@ -492,7 +493,7 @@ class GreenFormer(nn.Module):
 
     def _refiner_tile_loop(
         self,
-        refiner_fn: object,
+        refiner_fn: Callable[..., mx.array],
         rgb: mx.array,
         coarse: mx.array,
         ts: int,

@@ -205,7 +205,7 @@ def metal_groupnorm(
         mean_flat = mean.reshape(B * _NUM_GROUPS)
         var_flat = var.reshape(B * _NUM_GROUPS)
         sums = mean_flat * n
-        sumsqs = (var_flat + mean_flat * mean_flat) * n
+        sumsqs = mx.maximum(var_flat + mean_flat * mean_flat, mx.array(0.0)) * n
         # Interleave: stats[i*2] = sum, stats[i*2+1] = sumsq
         stats = mx.stack([sums, sumsqs], axis=-1).reshape(B * _NUM_GROUPS * 2)
     else:
