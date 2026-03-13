@@ -173,6 +173,7 @@ def metal_groupnorm(
     x: mx.array,
     weight: mx.array,
     bias: mx.array,
+    frozen_stats: tuple[mx.array, mx.array] | None = None,
 ) -> mx.array:
     """Custom Metal GroupNorm for refiner (G=8, C=64).
 
@@ -183,6 +184,9 @@ def metal_groupnorm(
         x: (B, H, W, 64) input tensor in NHWC
         weight: (64,) affine scale
         bias: (64,) affine offset
+        frozen_stats: Optional (mean, var) from full-image stats collection.
+            When provided, skips kernel A (stats computation) and uses these
+            instead. Both arrays should be (B, G, 1) float32.
 
     Returns:
         Normalized tensor, same shape and dtype as x.
@@ -193,18 +197,30 @@ def metal_groupnorm(
     w32 = weight.astype(mx.float32) if weight.dtype != mx.float32 else weight
     b32 = bias.astype(mx.float32) if bias.dtype != mx.float32 else bias
 
-    # Kernel A: stats reduction
-    num_tg_stats = B * _NUM_GROUPS * _CHUNKS_PER_GROUP
-    stats_shape = (B * _NUM_GROUPS * 2,)
-    stats = _stats_kernel(
-        inputs=[x, _chunks_dummy],
-        template=[("T", x.dtype)],
-        output_shapes=[stats_shape],
-        output_dtypes=[mx.float32],
-        grid=(num_tg_stats * _THREADS_PER_TG, 1, 1),
-        threadgroup=(_THREADS_PER_TG, 1, 1),
-        init_value=0,
-    )[0]
+    if frozen_stats is not None:
+        # Convert (mean, var) to (sum, sumsq) format for kernel B
+        mean, var = frozen_stats
+        n = float(H * W * _GROUP_SIZE)
+        # Flatten (B, G, 1) → (B*G,) then interleave as (sum0, sumsq0, sum1, sumsq1, ...)
+        mean_flat = mean.reshape(B * _NUM_GROUPS)
+        var_flat = var.reshape(B * _NUM_GROUPS)
+        sums = mean_flat * n
+        sumsqs = (var_flat + mean_flat * mean_flat) * n
+        # Interleave: stats[i*2] = sum, stats[i*2+1] = sumsq
+        stats = mx.stack([sums, sumsqs], axis=-1).reshape(B * _NUM_GROUPS * 2)
+    else:
+        # Kernel A: stats reduction
+        num_tg_stats = B * _NUM_GROUPS * _CHUNKS_PER_GROUP
+        stats_shape = (B * _NUM_GROUPS * 2,)
+        stats = _stats_kernel(
+            inputs=[x, _chunks_dummy],
+            template=[("T", x.dtype)],
+            output_shapes=[stats_shape],
+            output_dtypes=[mx.float32],
+            grid=(num_tg_stats * _THREADS_PER_TG, 1, 1),
+            threadgroup=(_THREADS_PER_TG, 1, 1),
+            init_value=0,
+        )[0]
 
     # Kernel B: normalize + affine
     total_elements = B * H * W * C

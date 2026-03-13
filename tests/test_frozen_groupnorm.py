@@ -100,9 +100,9 @@ class TestFrozenStatsIdentity:
         # mx.eval: MLX array materialization
         mx.eval(out_frozen)  # noqa: S307
 
-        # Frozen output must exactly match collecting output (same mean/var)
+        # Frozen output uses Metal kernel with converted stats — tiny fp32 roundtrip diff
         diff_frozen = float(mx.max(mx.abs(out_frozen - out_collecting)))
-        assert diff_frozen == 0.0, f"Frozen vs collecting diff={diff_frozen}"
+        assert diff_frozen < 1e-5, f"Frozen vs collecting diff={diff_frozen}"
 
         # Cleanup
         gn._frozen_stats = None

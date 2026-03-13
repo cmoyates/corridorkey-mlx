@@ -39,50 +39,29 @@ class FrozenGroupNorm(nn.Module):
         self._collected_stats: tuple[mx.array, mx.array] | None = None
 
     def __call__(self, x: mx.array) -> mx.array:
-        if self._frozen_stats is None and not self._collecting:
-            return self._fast_forward(x)
-        return self._custom_forward(x)
-
-    def _fast_forward(self, x: mx.array) -> mx.array:
-        """Normal path — custom Metal GroupNorm (no transposes)."""
+        if self._frozen_stats is not None:
+            # Frozen path — Metal kernel with precomputed stats (no transposes)
+            return metal_groupnorm(x, self.weight, self.bias, frozen_stats=self._frozen_stats)
+        if self._collecting:
+            return self._collecting_forward(x)
+        # Normal path — Metal kernel computes its own stats
         return metal_groupnorm(x, self.weight, self.bias)
 
-    def _fallback_forward(self, x: mx.array) -> mx.array:
-        """Fallback — identical to nn.GroupNorm(pytorch_compatible=True)."""
+    def _collecting_forward(self, x: mx.array) -> mx.array:
+        """Collecting path — compute mean/var, save stats, return normal output."""
         batch, *rest, dims = x.shape
         group_size = dims // self.num_groups
-        x = x.reshape(batch, -1, self.num_groups, group_size)
-        x = x.transpose(0, 2, 1, 3).reshape(batch, self.num_groups, -1)
-        x = mx.fast.layer_norm(x, eps=self.eps, weight=None, bias=None)
-        x = x.reshape(batch, self.num_groups, -1, group_size)
-        x = x.transpose(0, 2, 1, 3).reshape(batch, *rest, dims)
-        return x * self.weight + self.bias
+        x_grouped = x.reshape(batch, -1, self.num_groups, group_size)
+        x_grouped = x_grouped.transpose(0, 2, 1, 3).reshape(batch, self.num_groups, -1)
 
-    def _custom_forward(self, x: mx.array) -> mx.array:
-        """Collecting/frozen path — manual mean/var computation."""
-        batch, *rest, dims = x.shape
-        group_size = dims // self.num_groups
-        x = x.reshape(batch, -1, self.num_groups, group_size)
-        x = x.transpose(0, 2, 1, 3).reshape(batch, self.num_groups, -1)
+        # Compute stats in fp32 for numerical stability
+        x_f32 = x_grouped.astype(mx.float32)
+        mean = x_f32.mean(axis=-1, keepdims=True)
+        var = x_f32.var(axis=-1, keepdims=True)
+        self._collected_stats = (mean, var)
 
-        if self._frozen_stats is not None:
-            mean, var = self._frozen_stats
-        else:
-            # Compute stats in fp32 for numerical stability — at full 2048x2048
-            # resolution, float16 variance overflows (33M elements per group)
-            x_f32 = x.astype(mx.float32)
-            mean = x_f32.mean(axis=-1, keepdims=True)
-            var = x_f32.var(axis=-1, keepdims=True)
-            if self._collecting:
-                self._collected_stats = (mean, var)
-
-        # Normalize in input dtype to preserve activation precision
-        input_dtype = x.dtype
-        x = (x - mean.astype(input_dtype)) * mx.rsqrt(var.astype(input_dtype) + self.eps)
-
-        x = x.reshape(batch, self.num_groups, -1, group_size)
-        x = x.transpose(0, 2, 1, 3).reshape(batch, *rest, dims)
-        return x * self.weight + self.bias
+        # Use Metal kernel for the actual normalization (fast path)
+        return metal_groupnorm(x, self.weight, self.bias)
 
 
 class RefinerBlock(nn.Module):
