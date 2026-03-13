@@ -18,6 +18,9 @@ checkpoints/
 # Large generated fixtures (golden .npz kept small; regenerate with dump script)
 reference/fixtures/*.npz
 
+# Video test footage (large binary frames)
+reference/video/
+
 # Sample images
 samples/
 
