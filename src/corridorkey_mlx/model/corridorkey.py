@@ -185,6 +185,118 @@ class GreenFormer(nn.Module):
             "fg_final": fg_final.astype(mx.float32),
         }
 
+    def run_backbone(self, x: mx.array) -> list[mx.array]:
+        """Run backbone only, return multiscale features.
+
+        Uses compiled callable when available. Casts features to compute
+        dtype if configured (e.g. bf16 for decoder bandwidth savings).
+
+        Args:
+            x: (B, H, W, 4) NHWC input.
+
+        Returns:
+            List of 4 feature maps at strides [4, 8, 16, 32].
+        """
+        backbone_fn = self._compiled_backbone_call or self.backbone
+        features = backbone_fn(x)
+        if self._compute_dtype != mx.float32:
+            features = [f.astype(self._compute_dtype) for f in features]
+        return features
+
+    def run_decoders(self, features: list[mx.array]) -> dict[str, mx.array]:
+        """Run decoder heads on backbone features. Does NOT consume features.
+
+        Returns coarse alpha/fg and upsampled logits needed by refiner.
+
+        Args:
+            features: 4 multiscale feature maps from run_backbone().
+
+        Returns:
+            Dict with alpha_logits_up, fg_logits_up, alpha_coarse, fg_coarse.
+        """
+        if self._fused_decode:
+            fused_fn = self._compiled_fused_pair_call or self._fused_pair
+            alpha_logits, fg_logits = fused_fn(features)
+        else:
+            alpha_fn = self._compiled_alpha_decoder_call or self.alpha_decoder
+            fg_fn = self._compiled_fg_decoder_call or self.fg_decoder
+            alpha_logits = alpha_fn(features)
+            with mx.stream(self._fg_stream):
+                fg_logits = fg_fn(features)
+
+        alpha_logits_up = self._logit_upsampler(alpha_logits)
+        fg_logits_up = self._logit_upsampler(fg_logits)
+        alpha_coarse = mx.sigmoid(alpha_logits_up)
+        fg_coarse = mx.sigmoid(fg_logits_up)
+
+        return {
+            "alpha_logits_up": alpha_logits_up,
+            "fg_logits_up": fg_logits_up,
+            "alpha_coarse": alpha_coarse,
+            "fg_coarse": fg_coarse,
+        }
+
+    def run_refiner(
+        self, x: mx.array, coarse: dict[str, mx.array]
+    ) -> dict[str, mx.array]:
+        """Run refiner on fresh RGB + coarse predictions from decoders.
+
+        Produces final alpha and foreground via additive residual in logit
+        space. Supports tiled execution and reduced-precision refiner.
+
+        Args:
+            x: (B, H, W, 4) NHWC input (RGB extracted from channels 0:3).
+            coarse: Dict from run_decoders() with logits_up and coarse maps.
+
+        Returns:
+            Dict with alpha_coarse, fg_coarse, alpha_final, fg_final (fp32).
+            If not slim, also includes intermediate logits/delta.
+        """
+        alpha_logits_up = coarse["alpha_logits_up"]
+        fg_logits_up = coarse["fg_logits_up"]
+        alpha_coarse = coarse["alpha_coarse"]
+        fg_coarse = coarse["fg_coarse"]
+
+        rgb = x[:, :, :, :3]
+        coarse_pred = mx.concatenate([alpha_coarse, fg_coarse], axis=-1)
+        refiner_fn = self._compiled_refiner_call or self.refiner
+
+        if self._refiner_dtype is not None:
+            rgb_r = rgb.astype(self._refiner_dtype)
+            coarse_r = coarse_pred.astype(self._refiner_dtype)
+        else:
+            rgb_r, coarse_r = rgb, coarse_pred
+
+        ts = self._refiner_tile_size
+        if ts is not None and (rgb_r.shape[1] > ts or rgb_r.shape[2] > ts):
+            delta_logits = self._refiner_tiled(refiner_fn, rgb_r, coarse_r)
+        else:
+            delta_logits = refiner_fn(rgb_r, coarse_r)
+
+        if self._refiner_dtype is not None:
+            del rgb_r, coarse_r
+
+        alpha_final = mx.sigmoid(alpha_logits_up + delta_logits[:, :, :, 0:1])
+        fg_final = mx.sigmoid(fg_logits_up + delta_logits[:, :, :, 1:4])
+
+        if self._slim:
+            return {
+                "alpha_coarse": alpha_coarse.astype(mx.float32),
+                "fg_coarse": fg_coarse.astype(mx.float32),
+                "alpha_final": alpha_final.astype(mx.float32),
+                "fg_final": fg_final.astype(mx.float32),
+            }
+
+        return {
+            "alpha_logits_up": alpha_logits_up.astype(mx.float32),
+            "fg_logits_up": fg_logits_up.astype(mx.float32),
+            "alpha_coarse": alpha_coarse.astype(mx.float32),
+            "fg_coarse": fg_coarse.astype(mx.float32),
+            "delta_logits": delta_logits.astype(mx.float32),
+            "alpha_final": alpha_final.astype(mx.float32),
+            "fg_final": fg_final.astype(mx.float32),
+        }
+
     def forward_eager(self, x: mx.array) -> dict[str, mx.array]:
         """Eager forward with async materialization and multi-stream dispatch.
 

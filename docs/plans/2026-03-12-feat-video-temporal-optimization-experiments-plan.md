@@ -148,10 +148,10 @@ Don't add `process_video()` to the engine. Create a standalone `VideoProcessor` 
   - If decode > 10ms: add `ThreadPoolExecutor` for overlapping **PNG save** with inference (not decode — the real I/O opportunity is save, ~15-30ms for 1024x1024 RGBA PNG)
 
 **Acceptance criteria:**
-- [ ] Process all 37 frames without OOM
-- [ ] Per-frame latency within 5% of single-frame benchmark (no regression from loop overhead)
-- [ ] Reference outputs saved for fidelity comparison in later experiments
-- [ ] Decode time measured separately per-frame
+- [x] Process all 37 frames without OOM
+- [x] Per-frame latency within 5% of single-frame benchmark (no regression from loop overhead)
+- [x] Reference outputs saved for fidelity comparison in later experiments
+- [x] Decode time measured separately per-frame
 - [ ] Frame 0 also validated against golden.npz (catch preprocessing regressions)
 
 **Rollback:** N/A — new files only.
@@ -189,8 +189,8 @@ Don't add `process_video()` to the engine. Create a standalone `VideoProcessor` 
 **Hypothesis:** At skip=3, effective cost = (350 + 3x120) / 3 ~ 237ms/frame (1.8x speedup). At skip=5, ~ 190ms/frame (2.2x).
 
 **Prerequisites (implement in V0 or as V2 sub-task):**
-- [ ] Add `run_backbone()`, `run_decoders()`, `run_refiner()` to GreenFormer
-- [ ] Verify per-component compiled callables work when called individually
+- [x] Add `run_backbone()`, `run_decoders()`, `run_refiner()` to GreenFormer
+- [x] Verify per-component compiled callables work when called individually (bit-exact with __call__)
 
 **Implementation:**
 - Feature cache as bare variables (not a class — a class wrapping a list is over-engineering):
@@ -208,11 +208,13 @@ Don't add `process_video()` to the engine. Create a standalone `VideoProcessor` 
 **Sweep:** Run with skip_interval in [2, 3, 5] on the 37-frame clip.
 
 **Acceptance criteria:**
-- [ ] Per-frame max_abs < 5e-3 vs V0 reference outputs (across all 37 frames)
-- [ ] Report: max/mean/p95 error per skip ratio
-- [ ] Report: FPS per skip ratio
-- [ ] At least 1.5x throughput improvement at best skip ratio that passes fidelity
-- [ ] Peak memory monitored per-frame (should be stable, not growing)
+- [x] ~~Per-frame max_abs < 5e-3 vs V0 reference outputs~~ FAILED — max_abs ~1.0 at motion boundaries
+- [x] Report: max/mean/p95 error per skip ratio — done (skip 2/3/5 all fail fidelity)
+- [x] Report: FPS per skip ratio — skip2=2.42, skip3=2.65, skip5=2.94 FPS
+- [ ] ~~At least 1.5x throughput improvement at best skip ratio that passes fidelity~~ BLOCKED — no skip ratio passes fidelity
+- [x] Peak memory monitored per-frame (stable at 3508MB, not growing)
+
+**Result: REJECTED.** Backbone skip is not viable for CorridorKey. The 4ch input (RGB+hint) means cached backbone features carry stale alpha hint spatial info. The refiner (additive residual on fresh RGB) cannot correct the coarse mismatch. Mean per-pixel error 4.2% on high-motion frames; visually unacceptable. See `research/artifacts/video_v2_skip*.json`.
 
 **Fidelity measurement:**
 ```python
