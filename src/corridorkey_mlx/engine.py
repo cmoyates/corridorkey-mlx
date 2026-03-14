@@ -176,8 +176,8 @@ class CorridorKeyMLXEngine:
             mask_f32 = mask_f32[:, :, np.newaxis]
 
         if self._tiled:
-            # Tiled: keep full-res, preprocess on GPU, run tiled_inference
-            x = preprocess_mlx(rgb_f32, mask_f32)
+            # Tiled: keep full-res, preprocess, run tiled_inference
+            x = preprocess(rgb_f32, mask_f32)
             outputs = tiled_inference(
                 self._model, x, tile_size=self._tile_size, overlap=self._overlap
             )
