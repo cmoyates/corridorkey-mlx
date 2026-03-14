@@ -30,7 +30,7 @@ def test_package_imports() -> None:
     import corridorkey_mlx.model  # noqa: F401
     import corridorkey_mlx.utils  # noqa: F401
 
-    assert corridorkey_mlx.__version__ == "0.1.0"
+    assert corridorkey_mlx.__version__ == "2.1.0"
 
 
 # ---------------------------------------------------------------------------

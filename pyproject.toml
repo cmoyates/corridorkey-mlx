@@ -1,6 +1,6 @@
 [project]
 name = "corridorkey-mlx"
-version = "0.1.0"
+version = "2.1.0"
 description = "MLX inference port of CorridorKey for Apple Silicon"
 readme = "README.md"
 requires-python = ">=3.11"

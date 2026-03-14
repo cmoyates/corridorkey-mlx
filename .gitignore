@@ -36,7 +36,8 @@ artifacts/
 # OS files
 .DS_Store
 
-*.safetensors*
+# Allow release checksum
+!corridorkey_mlx.safetensors.sha256
 
 # Research lab artifacts (machine-local, not committed)
 research/artifacts/
