@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TILE_SIZE = 768
 DEFAULT_OVERLAP = 128
+BBOX_THRESHOLD = 0.01
 
 
 def _compute_tile_coords(
@@ -101,7 +102,6 @@ def _find_subject_bbox(
     Returns:
         (y_start, y_end, x_start, x_end) or None if mask is all-zero.
     """
-    BBOX_THRESHOLD = 0.01
     # Find non-zero rows and columns
     row_any = mx.any(mask > BBOX_THRESHOLD, axis=1)  # (H,)
     col_any = mx.any(mask > BBOX_THRESHOLD, axis=0)  # (W,)
@@ -218,7 +218,7 @@ def tiled_inference(
         bbox_h = y_end - y_start
         bbox_w = x_end - x_start
         if bbox_h <= tile_size and bbox_w <= tile_size:
-            logger.info(
+            logger.debug(
                 "Single-tile shortcut: subject bbox %dx%d fits in %dx%d tile",
                 bbox_w, bbox_h, tile_size, tile_size,
             )
