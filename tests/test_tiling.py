@@ -9,10 +9,12 @@ Verifies that:
 from __future__ import annotations
 
 import mlx.core as mx
+import numpy as np
 import pytest
 
 from corridorkey_mlx.inference.tiling import (
     _compute_tile_coords,
+    _find_subject_bbox,
     _make_blend_weights_2d,
     tiled_inference,
 )
@@ -122,3 +124,67 @@ class TestTiledInference:
         x = mx.random.normal((2, TILE_SIZE, TILE_SIZE, 4))
         with pytest.raises(ValueError, match="batch_size=1"):
             tiled_inference(model, x, tile_size=TILE_SIZE)
+
+
+class TestSubjectBbox:
+    def test_empty_mask_returns_none(self) -> None:
+        mask = mx.zeros((512, 512))
+        assert _find_subject_bbox(mask, margin=64) is None
+
+    def test_small_centered_subject(self) -> None:
+        mask_np = np.zeros((512, 512), dtype=np.float32)
+        mask_np[200:300, 200:300] = 1.0
+        mask = mx.array(mask_np)
+        bbox = _find_subject_bbox(mask, margin=32)
+        assert bbox is not None
+        y0, y1, x0, x1 = bbox
+        assert y0 == 200 - 32
+        assert y1 == 300 + 32
+        assert x0 == 200 - 32
+        assert x1 == 300 + 32
+
+    def test_margin_clamped_to_bounds(self) -> None:
+        mask_np = np.zeros((512, 512), dtype=np.float32)
+        mask_np[0:50, 0:50] = 1.0
+        mask = mx.array(mask_np)
+        bbox = _find_subject_bbox(mask, margin=100)
+        assert bbox is not None
+        y0, y1, x0, x1 = bbox
+        assert y0 == 0  # clamped
+        assert x0 == 0  # clamped
+        assert y1 == 150  # 50 + 100
+        assert x1 == 150
+
+
+class TestSingleTileInference:
+    def test_small_subject_uses_single_tile(self, model: GreenFormer) -> None:
+        """Subject fitting in one tile produces correct output shape."""
+        # 400x400 image with small subject in center (should fit in 256 tile)
+        x_np = np.random.default_rng(42).standard_normal((1, 400, 400, 4)).astype(np.float32)
+        # Zero out alpha hint everywhere except small center region
+        x_np[:, :, :, 3] = 0.0
+        x_np[:, 150:250, 150:250, 3] = 1.0
+        x = mx.array(x_np)
+
+        result = tiled_inference(model, x, tile_size=TILE_SIZE, overlap=32)
+        mx.eval(result)  # materialize  # noqa: S307
+
+        assert result["alpha_final"].shape == (1, 400, 400, 1)
+        assert result["fg_final"].shape == (1, 400, 400, 3)
+
+        # Background region should be zero alpha
+        alpha_bg = float(mx.max(mx.abs(result["alpha_final"][0, 0:50, 0:50, :])))
+        assert alpha_bg == 0.0, f"Background alpha should be 0, got {alpha_bg}"
+
+    def test_large_subject_falls_back_to_tiling(self, model: GreenFormer) -> None:
+        """Subject too large for single tile uses normal tiling."""
+        x_np = np.random.default_rng(42).standard_normal((1, 400, 400, 4)).astype(np.float32)
+        # Alpha hint covers entire image — won't fit in single tile
+        x_np[:, :, :, 3] = 1.0
+        x = mx.array(x_np)
+
+        result = tiled_inference(model, x, tile_size=TILE_SIZE, overlap=32)
+        mx.eval(result)  # materialize  # noqa: S307
+
+        assert result["alpha_final"].shape == (1, 400, 400, 1)
+        assert result["fg_final"].shape == (1, 400, 400, 3)

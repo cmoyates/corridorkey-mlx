@@ -16,7 +16,6 @@ from corridorkey_mlx.model.backbone import HieraBackbone
 from corridorkey_mlx.model.decoder import DecoderHead, FusedDecoderPair
 from corridorkey_mlx.model.hiera import ENCODER_KEY_PREFIX, _interpolate_pos_embed, _prod
 from corridorkey_mlx.model.refiner import CNNRefinerModule
-from corridorkey_mlx.utils.quantize import safe_quantize
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -44,9 +43,7 @@ class GreenFormer(nn.Module):
         compile_refiner: bool = True,
         compile_decoders: bool = True,
         compile_backbone: bool = True,
-        compile_forward: bool = False,
         refiner_tile_size: int | None = 1024,
-        quantize_backbone_stages: bool = False,
         backbone_bf16_stages123: bool = False,
         decoder_dtype: mx.Dtype | None = mx.bfloat16,
         refiner_skip_confidence: float | None = None,
@@ -55,7 +52,6 @@ class GreenFormer(nn.Module):
     ) -> None:
         super().__init__()
         self._compute_dtype = dtype
-        self._quantize_backbone_stages = quantize_backbone_stages
         self._fused_decode = fused_decode
         self._slim = slim
         self._stage_gc = stage_gc
@@ -64,7 +60,6 @@ class GreenFormer(nn.Module):
         self._compile_refiner = compile_refiner
         self._compile_decoders = compile_decoders
         self._compile_backbone = compile_backbone
-        self._compile_forward = compile_forward
         self._refiner_tile_size = refiner_tile_size
         self._decoder_dtype = decoder_dtype
         self._refiner_skip_confidence = refiner_skip_confidence
@@ -340,114 +335,6 @@ class GreenFormer(nn.Module):
             "fg_final": fg_final.astype(mx.float32),
         }
 
-    def forward_eager(self, x: mx.array) -> dict[str, mx.array]:
-        """Eager forward with async materialization and multi-stream dispatch.
-
-        Used by the per-component compilation path (compile_forward=False).
-        NOT safe for wrapping with mx.compile — use __call__ instead.
-        """
-        # Keep full-res input for refiner when resolutions are decoupled
-        x_full = x
-
-        # Downsample to backbone resolution if decoupled
-        if self._decoupled:
-            x = self._backbone_downsampler(x)
-
-        # Backbone always runs in fp32
-        backbone_fn = self._compiled_backbone_call or self.backbone
-        features = backbone_fn(x)
-
-        # Async-materialize backbone features so the CPU can build the
-        # decoder graph while the GPU finishes backbone work.
-        # NOTE: mx.async_eval is MLX array materialization, not Python's eval()
-        if self._stage_gc:
-            mx.async_eval(*features)  # noqa: S307  -- mx.async_eval, not builtins
-
-        # Cast features to compute dtype for decoders (bf16 saves memory)
-        if self._compute_dtype != mx.float32:
-            features = [f.astype(self._compute_dtype) for f in features]
-
-        # Decoder heads -> logits at backbone_H/4 resolution
-        if self._fused_decode:
-            fused_fn = self._compiled_fused_pair_call or self._fused_pair
-            alpha_logits, fg_logits = fused_fn(features)
-            del features
-
-            alpha_logits_up = self._logit_upsampler(alpha_logits)
-            fg_logits_up = self._logit_upsampler(fg_logits)
-        else:
-            alpha_fn = self._compiled_alpha_decoder_call or self.alpha_decoder
-            fg_fn = self._compiled_fg_decoder_call or self.fg_decoder
-            # Alpha pipeline on default stream
-            alpha_logits = alpha_fn(features)  # (B, bH/4, bW/4, 1)
-            # FG pipeline on secondary stream
-            with mx.stream(self._fg_stream):
-                fg_logits = fg_fn(features)  # (B, bH/4, bW/4, 3)
-
-            del features
-
-            alpha_logits_up = self._logit_upsampler(alpha_logits)  # (B, bH, bW, 1)
-            fg_logits_up = self._logit_upsampler(fg_logits)  # (B, bH, bW, 3)
-
-        # Upsample coarse logits from backbone_size to full res if decoupled
-        if self._decoupled:
-            alpha_logits_up = self._fullres_upsampler(alpha_logits_up)
-            fg_logits_up = self._fullres_upsampler(fg_logits_up)
-
-        alpha_coarse = mx.sigmoid(alpha_logits_up)
-        fg_coarse = mx.sigmoid(fg_logits_up)
-
-        # Async-materialize decoder outputs before refiner to free decoder
-        # intermediate buffers (im2col inflation in refiner).
-        # NOTE: mx.async_eval is MLX array materialization, not Python's eval()
-        if self._stage_gc:
-            mx.async_eval(alpha_logits_up, fg_logits_up, alpha_coarse, fg_coarse)  # noqa: S307  -- mx.async_eval, not Python's eval
-
-        # Refiner receives coarse predictions (optionally in reduced precision)
-        rgb = x_full[:, :, :, :3]  # (B, H, W, 3)
-        coarse_pred = mx.concatenate([alpha_coarse, fg_coarse], axis=-1)  # (B, H, W, 4)
-        refiner_fn = self._compiled_refiner_call or self.refiner
-
-        if self._refiner_dtype is not None:
-            rgb_r = rgb.astype(self._refiner_dtype)
-            coarse_r = coarse_pred.astype(self._refiner_dtype)
-        else:
-            rgb_r, coarse_r = rgb, coarse_pred
-
-        # Tiled refiner reduces peak im2col memory for dilated convolutions
-        ts = self._refiner_tile_size
-        if ts is not None and (rgb_r.shape[1] > ts or rgb_r.shape[2] > ts):
-            delta_logits = self._refiner_tiled(refiner_fn, rgb_r, coarse_r)
-        else:
-            delta_logits = refiner_fn(rgb_r, coarse_r)
-
-        if self._refiner_dtype is not None:
-            del rgb_r, coarse_r
-
-        # Final predictions: additive residual in logit space, then sigmoid
-        alpha_final = mx.sigmoid(alpha_logits_up + delta_logits[:, :, :, 0:1])
-        fg_final = mx.sigmoid(fg_logits_up + delta_logits[:, :, :, 1:4])
-
-        if self._slim:
-            return {
-                "alpha_coarse": alpha_coarse.astype(mx.float32),
-                "fg_coarse": fg_coarse.astype(mx.float32),
-                "alpha_final": alpha_final.astype(mx.float32),
-                "fg_final": fg_final.astype(mx.float32),
-            }
-
-        return {
-            "alpha_logits": alpha_logits.astype(mx.float32),
-            "fg_logits": fg_logits.astype(mx.float32),
-            "alpha_logits_up": alpha_logits_up.astype(mx.float32),
-            "fg_logits_up": fg_logits_up.astype(mx.float32),
-            "alpha_coarse": alpha_coarse.astype(mx.float32),
-            "fg_coarse": fg_coarse.astype(mx.float32),
-            "delta_logits": delta_logits.astype(mx.float32),
-            "alpha_final": alpha_final.astype(mx.float32),
-            "fg_final": fg_final.astype(mx.float32),
-        }
-
     def _refiner_tiled(
         self,
         refiner_fn: Callable[..., mx.array],
@@ -616,17 +503,6 @@ class GreenFormer(nn.Module):
         # materialize all parameters — mx.eval is MLX array materialization
         mx.eval(self.parameters())  # noqa: S307  -- mx.eval, not Python eval()
 
-        # Quantize backbone stages 1-3 (dims 224,448,896 — all divisible by 32).
-        # Stage 0 (dim=112) is skipped by safe_quantize. Int8 weights halve
-        # memory bandwidth for 22/24 blocks' Linear layers (attn qkv/proj + MLP).
-        if self._quantize_backbone_stages:
-            # stage_ends = [1, 4, 20, 23]; stages 1-3 = blocks 2..23
-            stage1_start = self.backbone.stage_ends[0] + 1  # block 2
-            for blk in self.backbone.blocks[stage1_start:]:
-                safe_quantize(blk, group_size=32, bits=8)
-            # materialize quantized parameters — mx.eval is MLX graph materialization
-            mx.eval(self.backbone.parameters())  # noqa: S307  -- mx.eval, not Python eval()
-
         # Fold BatchNorm into precomputed scale+offset (2 ops vs 5)
         # Also precomputes 2D weights for 1x1 conv addmm bypass
         self.alpha_decoder.fold_bn()
@@ -634,31 +510,16 @@ class GreenFormer(nn.Module):
         # Precompute refiner 1x1 conv weight for addmm bypass
         self.refiner.prepare_inference()
 
-        if self._compile_forward and not self._decoupled:
-            # Whole-forward compilation: fuses backbone + decoders + upsample +
-            # sigmoid + refiner + final sigmoid into a single compiled graph.
-            # Eliminates eager Metal dispatches between components and the
-            # stage_gc sync point.
-            # Disabled when decoupled — dual-resolution forward has varying shapes.
-            self._compiled = True
-            self.__call__ = mx.compile(self.__call__)  # type: ignore[method-assign]
-        else:
-            # Per-component compilation: each component individually compiled,
-            # with eager async_eval + multi-stream dispatch between them.
-            if self._compile_backbone:
-                self._compiled_backbone_call = mx.compile(self.backbone.__call__)
+        # Per-component compilation: each component individually compiled
+        if self._compile_backbone:
+            self._compiled_backbone_call = mx.compile(self.backbone.__call__)
 
-            if self._compile_refiner:
-                self._compiled_refiner_call = mx.compile(self.refiner.__call__)
+        if self._compile_refiner:
+            self._compiled_refiner_call = mx.compile(self.refiner.__call__)
 
-            if self._compile_decoders:
-                if self._fused_decode:
-                    self._compiled_fused_pair_call = mx.compile(self._fused_pair.__call__)
-                else:
-                    self._compiled_alpha_decoder_call = mx.compile(self.alpha_decoder.__call__)
-                    self._compiled_fg_decoder_call = mx.compile(self.fg_decoder.__call__)
-
-            # NOTE: forward_eager() provides async_eval + multi-stream dispatch
-            # but is NOT safe for mx.compile wrapping.  Callers that need eager
-            # optimizations without whole-forward compile should call
-            # model.forward_eager(x) directly.
+        if self._compile_decoders:
+            if self._fused_decode:
+                self._compiled_fused_pair_call = mx.compile(self._fused_pair.__call__)
+            else:
+                self._compiled_alpha_decoder_call = mx.compile(self.alpha_decoder.__call__)
+                self._compiled_fg_decoder_call = mx.compile(self.fg_decoder.__call__)

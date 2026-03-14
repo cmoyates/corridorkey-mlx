@@ -49,7 +49,7 @@ def load_model(
     decoder_dtype: mx.Dtype | None = mx.bfloat16,
     refiner_skip_confidence: float | None = None,
     refiner_tile_size: int | None = 1024,
-    refiner_frozen_gn: bool = False,
+    refiner_frozen_gn: bool = True,
     backbone_size: int | None = None,
 ) -> GreenFormer:
     """Build GreenFormer and load weights from safetensors checkpoint.
