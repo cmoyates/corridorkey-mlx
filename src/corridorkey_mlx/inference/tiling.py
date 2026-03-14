@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TILE_SIZE = 512
+DEFAULT_TILE_SIZE = 768
 DEFAULT_OVERLAP = 128
 
 
