@@ -92,12 +92,15 @@ class CorridorKeyMLXEngine:
             msg = f"Checkpoint not found: {checkpoint}"
             raise FileNotFoundError(msg)
 
-        # Tune MLX buffer commit frequency for tiled inference.
-        # Small buffers force frequent evaluation, preventing graph buildup
-        # that hurts tiled workloads. 17% faster at production resolution.
+        # Tune MLX buffer commit frequency.
+        # Without compilation: small buffers force frequent materialization,
+        # preventing graph buildup (17% faster for tiled workloads).
+        # With compilation: the compiler handles fusion, so larger buffers
+        # let the graph optimizer see more operations to fuse.
         import os
-        os.environ.setdefault("MLX_MAX_MB_PER_BUFFER", "2")
-        os.environ.setdefault("MLX_MAX_OPS_PER_BUFFER", "2")
+        if not compile:
+            os.environ.setdefault("MLX_MAX_MB_PER_BUFFER", "2")
+            os.environ.setdefault("MLX_MAX_OPS_PER_BUFFER", "2")
 
         if device is not None:
             logger.info("device=%r ignored on MLX (unified memory)", device)
@@ -113,6 +116,7 @@ class CorridorKeyMLXEngine:
             self._model: GreenFormer = load_model(
                 checkpoint, img_size=self._tile_size, compile=compile, slim=True,
                 backbone_size=backbone_size,
+                refiner_dtype=mx.float16,
             )
             logger.info(
                 "Tiled inference: tile_size=%d, overlap=%d", self._tile_size, self._overlap
@@ -123,6 +127,7 @@ class CorridorKeyMLXEngine:
             self._model = load_model(
                 checkpoint, img_size=img_size, compile=compile, slim=True,
                 backbone_size=backbone_size,
+                refiner_dtype=mx.float16,
             )
 
     def process_frame(
