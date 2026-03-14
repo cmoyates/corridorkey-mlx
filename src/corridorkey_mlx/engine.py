@@ -224,18 +224,12 @@ class CorridorKeyMLXEngine:
                 alpha_out = alpha_coarse * (1.0 - s) + alpha_refined * s
                 fg_out = fg_coarse * (1.0 - s) + fg_refined * s
 
-        # Release unused intermediate tensors
         del outputs
-        gc.collect()
 
         # -- postprocess to uint8 --
         alpha_u8 = postprocess_alpha(alpha_out)
         fg_u8 = postprocess_foreground(fg_out)
-
-        # Release all MLX array references, then free Metal buffer cache
         del alpha_out, fg_out
-        gc.collect()
-        mx.clear_cache()
 
         # -- resize back to original --
         if alpha_u8.shape[0] != original_h or alpha_u8.shape[1] != original_w:
