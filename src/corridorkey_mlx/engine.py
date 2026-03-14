@@ -131,26 +131,6 @@ class CorridorKeyMLXEngine:
                 refiner_dtype=mx.float16,
             )
 
-    def _warmup_model(self) -> None:
-        """Pre-warm Metal shader cache and MLX memory pool.
-
-        Runs a dummy zeros tile through the full pipeline so that all
-        Metal Pipeline State Objects are compiled, MLX compiled graphs
-        are traced, and the memory pool expands to working size before
-        real frames arrive. Eliminates first-frame JIT compilation stall.
-        """
-        dummy = mx.zeros((1, self._tile_size, self._tile_size, 4))
-        features = self._model.run_backbone(dummy)
-        # NOTE: mx.eval is MLX array materialization, not Python eval()
-        mx.eval(*features)  # noqa: S307
-        coarse = self._model.run_decoders(features)
-        mx.eval(coarse["alpha_coarse"], coarse["fg_coarse"])  # noqa: S307
-        del features
-        out = self._model.run_refiner(dummy, coarse)
-        mx.eval(out)  # noqa: S307
-        del out, coarse, dummy
-        logger.debug("Shader cache warmed")
-
     def process_frame(
         self,
         image: np.ndarray,
