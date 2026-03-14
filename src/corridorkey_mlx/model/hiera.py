@@ -349,9 +349,10 @@ class MaskUnitAttention(nn.Module):
         if num_windows == 1 and self._use_sdpa:
             # Fast path for global attention (stages 2-3, 19 of 24 blocks).
             # Each q/k/v is contiguous [B, N, dim_out] — reshapes are zero-copy.
-            q = mx.transpose(q.reshape(batch_size, num_tokens, self.heads, self.head_dim), axes=(0, 2, 1, 3))
-            k = mx.transpose(k.reshape(batch_size, num_tokens, self.heads, self.head_dim), axes=(0, 2, 1, 3))
-            v = mx.transpose(v.reshape(batch_size, num_tokens, self.heads, self.head_dim), axes=(0, 2, 1, 3))
+            heads_dim = (batch_size, num_tokens, self.heads, self.head_dim)
+            q = mx.transpose(q.reshape(heads_dim), axes=(0, 2, 1, 3))
+            k = mx.transpose(k.reshape(heads_dim), axes=(0, 2, 1, 3))
+            v = mx.transpose(v.reshape(heads_dim), axes=(0, 2, 1, 3))
 
             if self.q_stride > 1:
                 q = q.reshape(batch_size, self.heads, self.q_stride, -1, self.head_dim)
@@ -513,8 +514,9 @@ class HieraBackbone(nn.Module):
         self._unroll_spatial = list(self.tokens_spatial_shape)
         self._unroll_schedule = unroll_schedule
 
-        # Precompute unroll permutation — replaces 3 reshape-transpose-reshape
-        # cycles (each forcing a contiguous copy) with a single indexed gather.
+        # Precompute unroll permutation at init time so forward() uses a single
+        # mx.take gather instead of 3 reshape-transpose-reshape cycles (each
+        # of which forces a contiguous memory copy on the Metal backend).
         n_full = _prod(self.tokens_spatial_shape)
         dummy = mx.arange(n_full, dtype=mx.float32).reshape(1, n_full, 1)
         unrolled = unroll(dummy, self._unroll_spatial, unroll_schedule)
@@ -607,9 +609,9 @@ class HieraBackbone(nn.Module):
 
         # Pre-split QKV weights for contiguous Q/K/V outputs
         # Pre-transpose MLP weights for contiguous matmul operands
-        for blk in self.blocks:
-            blk.attn.prepare_split_qkv()
-            blk.mlp.prepare_transposed_weights()
+        for block in self.blocks:
+            block.attn.prepare_split_qkv()
+            block.mlp.prepare_transposed_weights()
 
     def __call__(self, x: mx.array) -> list[mx.array]:
         """Forward pass.
@@ -636,8 +638,8 @@ class HieraBackbone(nn.Module):
         # Run blocks, collecting features at stage_ends
         features: list[mx.array] = []
         stage0_end = self.stage_ends[0]
-        for i, blk in enumerate(self.blocks):
-            x = blk(x)
+        for i, block in enumerate(self.blocks):
+            x = block(x)
             # Cast activations to bf16 after stage 0 — halves bandwidth for
             # stages 1-3 (22 of 24 blocks).  Stage 0 stays fp32 for precision
             # (dim=112, mask-unit attention with q-pooling is sensitive).

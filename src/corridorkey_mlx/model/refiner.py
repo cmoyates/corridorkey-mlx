@@ -108,6 +108,8 @@ class CNNRefinerModule(nn.Module):
         )
         self.stem_gn = FrozenGroupNorm(REFINER_GROUPS, REFINER_CHANNELS)
 
+        # Exponentially increasing dilations give the refiner a 31px receptive
+        # field without pooling, preserving spatial detail at full resolution
         self.res1 = RefinerBlock(REFINER_CHANNELS, dilation=1)
         self.res2 = RefinerBlock(REFINER_CHANNELS, dilation=2)
         self.res3 = RefinerBlock(REFINER_CHANNELS, dilation=4)

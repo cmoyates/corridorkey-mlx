@@ -252,9 +252,9 @@ class VideoProcessor:
 
         # EMA temporal blending (output-space)
         if self.ema_alpha is not None and self._prev_alpha is not None:
-            a = self.ema_alpha
-            alpha_f32 = a * alpha_f32 + (1.0 - a) * self._prev_alpha
-            fg_f32 = a * fg_f32 + (1.0 - a) * self._prev_fg
+            blend_weight = self.ema_alpha
+            alpha_f32 = blend_weight * alpha_f32 + (1.0 - blend_weight) * self._prev_alpha
+            fg_f32 = blend_weight * fg_f32 + (1.0 - blend_weight) * self._prev_fg
 
         if self.ema_alpha is not None:
             self._prev_alpha = alpha_f32.copy()

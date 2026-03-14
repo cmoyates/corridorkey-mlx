@@ -21,6 +21,11 @@ DEFAULT_TILE_SIZE = 768
 DEFAULT_OVERLAP = 128
 BBOX_THRESHOLD = 0.01
 
+# Tiles where the alpha hint is uniformly below this (background) or above
+# 1-this (foreground) skip inference entirely — the refiner contributes
+# nothing when the coarse prediction is already confident.
+TILE_SKIP_CONFIDENCE = 0.01
+
 
 def _compute_tile_coords(
     image_size: int,
@@ -232,8 +237,6 @@ def tiled_inference(
     fg_accum = np.zeros((full_h, full_w, 3), dtype=np.float32)
     weight_accum = np.zeros((full_h, full_w, 1), dtype=np.float32)
 
-    # Confidence threshold for tile skipping (alpha hint channel)
-    SKIP_CONFIDENCE = 0.01
     tiles_skipped = 0
     tiles_total = len(y_coords) * len(x_coords)
 
@@ -247,12 +250,12 @@ def tiled_inference(
             mask_min = float(mx.min(mask_tile).item())
             mask_max = float(mx.max(mask_tile).item())
 
-            if mask_max < SKIP_CONFIDENCE:
+            if mask_max < TILE_SKIP_CONFIDENCE:
                 # Pure background — skip inference, fill zeros
                 alpha_tile = np.zeros((actual_h, actual_w, 1), dtype=np.float32)
                 fg_tile = np.zeros((actual_h, actual_w, 3), dtype=np.float32)
                 tiles_skipped += 1
-            elif mask_min > (1.0 - SKIP_CONFIDENCE):
+            elif mask_min > (1.0 - TILE_SKIP_CONFIDENCE):
                 # Pure foreground — skip inference, fill ones + input RGB
                 alpha_tile = np.ones((actual_h, actual_w, 1), dtype=np.float32)
                 fg_tile = np.array(mx.sigmoid(x[0, y_start:y_end, x_start:x_end, :3]))
@@ -283,15 +286,15 @@ def tiled_inference(
                 xi > 0,  # has left neighbor
                 xi < len(x_coords) - 1,  # has right neighbor
             )
-            w = _make_blend_weights_2d(actual_h, actual_w, overlap, position)
-            w3d = w[:, :, None]  # (H, W, 1)
+            blend_weights = _make_blend_weights_2d(actual_h, actual_w, overlap, position)
+            blend_weights_3d = blend_weights[:, :, None]  # (H, W, 1)
 
-            alpha_accum[y_start:y_end, x_start:x_end, :] += alpha_tile * w3d
-            fg_accum[y_start:y_end, x_start:x_end, :] += fg_tile * w3d
-            weight_accum[y_start:y_end, x_start:x_end, :] += w3d
+            alpha_accum[y_start:y_end, x_start:x_end, :] += alpha_tile * blend_weights_3d
+            fg_accum[y_start:y_end, x_start:x_end, :] += fg_tile * blend_weights_3d
+            weight_accum[y_start:y_end, x_start:x_end, :] += blend_weights_3d
 
             # Lightweight cleanup — delete refs but skip expensive gc/cache flush
-            del alpha_tile, fg_tile, w, w3d
+            del alpha_tile, fg_tile, blend_weights, blend_weights_3d
 
     if tiles_skipped > 0:
         skip_pct = 100.0 * tiles_skipped / tiles_total

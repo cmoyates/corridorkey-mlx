@@ -6,7 +6,6 @@ All internal operations use NHWC layout.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import mlx.core as mx
@@ -18,6 +17,7 @@ from corridorkey_mlx.model.hiera import ENCODER_KEY_PREFIX, _interpolate_pos_emb
 from corridorkey_mlx.model.refiner import CNNRefinerModule
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 BACKBONE_CHANNELS = [112, 224, 448, 896]
@@ -84,7 +84,8 @@ class GreenFormer(nn.Module):
         self._compiled_fused_pair_call = None
         self._compiled_backbone_call = None
 
-        # Secondary GPU stream for parallel decoder dispatch
+        # Alpha and FG decoders are independent — running FG on a second GPU
+        # stream lets both decoders execute concurrently on the Metal backend
         self._fg_stream = mx.new_stream(mx.gpu)
 
         if fused_decode:
@@ -185,21 +186,25 @@ class GreenFormer(nn.Module):
         coarse_pred = mx.concatenate([alpha_coarse, fg_coarse], axis=-1)  # (B, H, W, 4)
         refiner_fn = self._compiled_refiner_call or self.refiner
 
+        # Cast to reduced precision for refiner bandwidth savings (e.g. fp16)
         if self._refiner_dtype is not None:
-            rgb_r = rgb.astype(self._refiner_dtype)
-            coarse_r = coarse_pred.astype(self._refiner_dtype)
+            rgb_reduced = rgb.astype(self._refiner_dtype)
+            coarse_reduced = coarse_pred.astype(self._refiner_dtype)
         else:
-            rgb_r, coarse_r = rgb, coarse_pred
+            rgb_reduced, coarse_reduced = rgb, coarse_pred
 
         # Tiled refiner reduces peak im2col memory for dilated convolutions
-        ts = self._refiner_tile_size
-        if ts is not None and (rgb_r.shape[1] > ts or rgb_r.shape[2] > ts):
-            delta_logits = self._refiner_tiled(refiner_fn, rgb_r, coarse_r)
+        tile_size = self._refiner_tile_size
+        exceeds_tile = tile_size is not None and (
+            rgb_reduced.shape[1] > tile_size or rgb_reduced.shape[2] > tile_size
+        )
+        if exceeds_tile:
+            delta_logits = self._refiner_tiled(refiner_fn, rgb_reduced, coarse_reduced)
         else:
-            delta_logits = refiner_fn(rgb_r, coarse_r)
+            delta_logits = refiner_fn(rgb_reduced, coarse_reduced)
 
         if self._refiner_dtype is not None:
-            del rgb_r, coarse_r
+            del rgb_reduced, coarse_reduced
 
         # Final predictions: additive residual in logit space, then sigmoid
         alpha_final = mx.sigmoid(alpha_logits_up + delta_logits[:, :, :, 0:1])
@@ -299,20 +304,24 @@ class GreenFormer(nn.Module):
         coarse_pred = mx.concatenate([alpha_coarse, fg_coarse], axis=-1)
         refiner_fn = self._compiled_refiner_call or self.refiner
 
+        # Cast to reduced precision for refiner bandwidth savings (e.g. fp16)
         if self._refiner_dtype is not None:
-            rgb_r = rgb.astype(self._refiner_dtype)
-            coarse_r = coarse_pred.astype(self._refiner_dtype)
+            rgb_reduced = rgb.astype(self._refiner_dtype)
+            coarse_reduced = coarse_pred.astype(self._refiner_dtype)
         else:
-            rgb_r, coarse_r = rgb, coarse_pred
+            rgb_reduced, coarse_reduced = rgb, coarse_pred
 
-        ts = self._refiner_tile_size
-        if ts is not None and (rgb_r.shape[1] > ts or rgb_r.shape[2] > ts):
-            delta_logits = self._refiner_tiled(refiner_fn, rgb_r, coarse_r)
+        tile_size = self._refiner_tile_size
+        exceeds_tile = tile_size is not None and (
+            rgb_reduced.shape[1] > tile_size or rgb_reduced.shape[2] > tile_size
+        )
+        if exceeds_tile:
+            delta_logits = self._refiner_tiled(refiner_fn, rgb_reduced, coarse_reduced)
         else:
-            delta_logits = refiner_fn(rgb_r, coarse_r)
+            delta_logits = refiner_fn(rgb_reduced, coarse_reduced)
 
         if self._refiner_dtype is not None:
-            del rgb_r, coarse_r
+            del rgb_reduced, coarse_reduced
 
         alpha_final = mx.sigmoid(alpha_logits_up + delta_logits[:, :, :, 0:1])
         fg_final = mx.sigmoid(fg_logits_up + delta_logits[:, :, :, 1:4])
@@ -353,9 +362,11 @@ class GreenFormer(nn.Module):
         When refiner_frozen_gn is enabled, precomputes GroupNorm stats on
         the full image before tiling so per-tile stats match full-image.
         """
-        ts = self._refiner_tile_size
-        assert ts is not None
-        overlap = 32  # RF radius: stem(1) + res1(2) + res2(4) + res3(8) + res4(16) = 31
+        tile_size = self._refiner_tile_size
+        assert tile_size is not None
+        # Overlap must cover the refiner's receptive field radius:
+        # stem(1) + res1(2) + res2(4) + res3(8) + res4(16) = 31px
+        overlap = 32
         H = rgb.shape[1]
         W = rgb.shape[2]
         skip_thresh = self._refiner_skip_confidence
@@ -373,7 +384,9 @@ class GreenFormer(nn.Module):
         self._tiles_total = 0
 
         try:
-            return self._refiner_tile_loop(refiner_fn, rgb, coarse, ts, overlap, H, W, skip_thresh)
+            return self._refiner_tile_loop(
+                refiner_fn, rgb, coarse, tile_size, overlap, H, W, skip_thresh
+            )
         finally:
             if self._refiner_frozen_gn:
                 self.refiner.unfreeze_groupnorm_stats()
@@ -383,7 +396,7 @@ class GreenFormer(nn.Module):
         refiner_fn: Callable[..., mx.array],
         rgb: mx.array,
         coarse: mx.array,
-        ts: int,
+        tile_size: int,
         overlap: int,
         H: int,
         W: int,
@@ -396,8 +409,8 @@ class GreenFormer(nn.Module):
             tile_cols: list[mx.array] = []
             x = 0
             while x < W:
-                own_h = min(ts, H - y)
-                own_w = min(ts, W - x)
+                own_h = min(tile_size, H - y)
+                own_w = min(tile_size, W - x)
                 self._tiles_total += 1
 
                 # Adaptive skip: check coarse alpha confidence on owned region
@@ -413,14 +426,14 @@ class GreenFormer(nn.Module):
                         zeros = mx.zeros((rgb.shape[0], own_h, own_w, 4), dtype=rgb.dtype)
                         tile_cols.append(zeros)
                         self._tiles_skipped += 1
-                        x += ts
+                        x += tile_size
                         continue
 
                 # Extract tile with overlap padding (clamped to image bounds)
                 y0 = max(0, y - overlap)
                 x0 = max(0, x - overlap)
-                y1 = min(H, y + ts + overlap)
-                x1 = min(W, x + ts + overlap)
+                y1 = min(H, y + tile_size + overlap)
+                x1 = min(W, x + tile_size + overlap)
 
                 delta_tile = refiner_fn(
                     rgb[:, y0:y1, x0:x1, :],
@@ -438,13 +451,13 @@ class GreenFormer(nn.Module):
                 mx.eval(cropped)  # noqa: S307
                 del delta_tile
                 tile_cols.append(cropped)
-                x += ts
+                x += tile_size
 
             if len(tile_cols) > 1:
                 tile_rows.append(mx.concatenate(tile_cols, axis=2))
             else:
                 tile_rows.append(tile_cols[0])
-            y += ts
+            y += tile_size
 
         if len(tile_rows) > 1:
             return mx.concatenate(tile_rows, axis=1)

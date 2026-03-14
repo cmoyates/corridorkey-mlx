@@ -152,9 +152,10 @@ class DecoderHead(nn.Module):
             projected.append(x)
 
         # Accumulate per-scale matmuls instead of concatenating all 4 projections
-        # into a 4*embed_dim tensor.  Avoids the 1024-channel intermediate alloc.
+        # into a 4*embed_dim tensor — avoids the 1024-channel intermediate alloc.
         # Matmul distributes: [c4|c3|c2|c1] @ W = c4@W0 + c3@W1 + c2@W2 + c1@W3.
-        # Order: c4, c3, c2, c1 (reversed) to match trained weight layout.
+        # Reversed order (c4→c1) matches the PyTorch SegFormer weight layout where
+        # the deepest features are concatenated first.
         if self._fuse_weight_chunks:
             fused = projected[3] @ self._fuse_weight_chunks[0].T
             fused = fused + projected[2] @ self._fuse_weight_chunks[1].T
@@ -236,16 +237,17 @@ class FusedDecoderPair(nn.Module):
 
         alpha_up = []
         fg_up = []
-        for a_proj, f_proj, up in zip(alpha_projs, fg_projs, self._upsamplers, strict=True):
+        for alpha_proj, fg_proj, up in zip(alpha_projs, fg_projs, self._upsamplers, strict=True):
             if up is not None:
-                # Batch upsample: concat along channel axis (NHWC)
-                fused = mx.concatenate([a_proj, f_proj], axis=-1)
+                # Batch upsample: concat along channel axis so one Metal dispatch
+                # handles both heads instead of two separate upsample calls
+                fused = mx.concatenate([alpha_proj, fg_proj], axis=-1)
                 fused = up(fused)
-                embed_dim = a_proj.shape[-1]
-                a_proj = fused[:, :, :, :embed_dim]
-                f_proj = fused[:, :, :, embed_dim:]
-            alpha_up.append(a_proj)
-            fg_up.append(f_proj)
+                embed_dim = alpha_proj.shape[-1]
+                alpha_proj = fused[:, :, :, :embed_dim]
+                fg_proj = fused[:, :, :, embed_dim:]
+            alpha_up.append(alpha_proj)
+            fg_up.append(fg_proj)
 
         alpha_logits = self.alpha_head._fuse_and_classify(alpha_up)
         fg_logits = self.fg_head._fuse_and_classify(fg_up)

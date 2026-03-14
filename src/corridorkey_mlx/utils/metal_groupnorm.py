@@ -194,8 +194,9 @@ def metal_groupnorm(
     _ensure_kernels()
     B, H, W, C = x.shape
 
-    w32 = weight.astype(mx.float32) if weight.dtype != mx.float32 else weight
-    b32 = bias.astype(mx.float32) if bias.dtype != mx.float32 else bias
+    # Metal kernels operate in fp32 for numerical stability — upcast if needed
+    weight_f32 = weight.astype(mx.float32) if weight.dtype != mx.float32 else weight
+    bias_f32 = bias.astype(mx.float32) if bias.dtype != mx.float32 else bias
 
     if frozen_stats is not None:
         # Convert (mean, var) to (sum, sumsq) format for kernel B
@@ -228,7 +229,7 @@ def metal_groupnorm(
         (total_elements + _THREADS_PER_TG - 1) // _THREADS_PER_TG
     ) * _THREADS_PER_TG
     out = _norm_kernel(
-        inputs=[x, stats, w32, b32],
+        inputs=[x, stats, weight_f32, bias_f32],
         template=[("T", x.dtype)],
         output_shapes=[x.shape],
         output_dtypes=[x.dtype],

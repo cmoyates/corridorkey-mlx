@@ -6,7 +6,6 @@ mirrors the Torch engine contract expected by the main CorridorKey repository.
 
 from __future__ import annotations
 
-import gc
 import logging
 import warnings
 from pathlib import Path
@@ -220,9 +219,9 @@ class CorridorKeyMLXEngine:
                 alpha_out = alpha_refined
                 fg_out = fg_refined
             else:
-                s = refiner_scale
-                alpha_out = alpha_coarse * (1.0 - s) + alpha_refined * s
-                fg_out = fg_coarse * (1.0 - s) + fg_refined * s
+                blend_factor = refiner_scale
+                alpha_out = alpha_coarse * (1.0 - blend_factor) + alpha_refined * blend_factor
+                fg_out = fg_coarse * (1.0 - blend_factor) + fg_refined * blend_factor
 
         del outputs
 
