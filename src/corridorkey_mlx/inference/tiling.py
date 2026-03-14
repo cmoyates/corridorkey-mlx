@@ -6,7 +6,6 @@ then blends results using linear ramp weights in the overlap region.
 
 from __future__ import annotations
 
-import gc
 import logging
 from typing import TYPE_CHECKING
 
@@ -89,6 +88,99 @@ def _make_blend_weights_2d(
     return weights
 
 
+def _find_subject_bbox(
+    mask: mx.array,
+    margin: int,
+) -> tuple[int, int, int, int] | None:
+    """Find bounding box of non-zero pixels in mask with margin.
+
+    Args:
+        mask: (H, W) alpha hint values.
+        margin: Pixels to expand bbox on each side.
+
+    Returns:
+        (y_start, y_end, x_start, x_end) or None if mask is all-zero.
+    """
+    BBOX_THRESHOLD = 0.01
+    # Find non-zero rows and columns
+    row_any = mx.any(mask > BBOX_THRESHOLD, axis=1)  # (H,)
+    col_any = mx.any(mask > BBOX_THRESHOLD, axis=0)  # (W,)
+    # NOTE: mx.eval is MLX array materialization, not Python eval()
+    mx.eval(row_any, col_any)  # noqa: S307
+
+    row_any_np = np.array(row_any)
+    col_any_np = np.array(col_any)
+
+    if not np.any(row_any_np):
+        return None
+
+    row_indices = np.nonzero(row_any_np)[0]
+    col_indices = np.nonzero(col_any_np)[0]
+
+    h, w = mask.shape
+    y_start = max(0, int(row_indices[0]) - margin)
+    y_end = min(h, int(row_indices[-1]) + 1 + margin)
+    x_start = max(0, int(col_indices[0]) - margin)
+    x_end = min(w, int(col_indices[-1]) + 1 + margin)
+
+    return y_start, y_end, x_start, x_end
+
+
+def _single_tile_inference(
+    model: GreenFormer,
+    x: mx.array,
+    bbox: tuple[int, int, int, int],
+    tile_size: int,
+) -> dict[str, mx.array]:
+    """Run inference on a single cropped tile and paste into full-res output.
+
+    Args:
+        model: Loaded GreenFormer.
+        x: Full-resolution input (1, H, W, 4) NHWC.
+        bbox: (y_start, y_end, x_start, x_end) subject bounding box.
+        tile_size: Model tile size for padding.
+
+    Returns:
+        Dict with 'alpha_final' and 'fg_final' at full resolution.
+    """
+    _, full_h, full_w, _ = x.shape
+    y_start, y_end, x_start, x_end = bbox
+    crop_h = y_end - y_start
+    crop_w = x_end - x_start
+
+    # Crop input to bbox
+    tile = x[:, y_start:y_end, x_start:x_end, :]
+
+    # Pad to tile_size
+    pad_h = tile_size - crop_h
+    pad_w = tile_size - crop_w
+    if pad_h > 0 or pad_w > 0:
+        tile = mx.pad(tile, [(0, 0), (0, pad_h), (0, pad_w), (0, 0)])
+
+    out = model(tile)
+    # NOTE: mx.eval is MLX array materialization, not Python eval()
+    mx.eval(out)  # noqa: S307
+
+    # Crop padding and paste into full-res output
+    alpha_crop = np.array(out["alpha_final"][0, :crop_h, :crop_w, :])
+    fg_crop = np.array(out["fg_final"][0, :crop_h, :crop_w, :])
+
+    alpha_full = np.zeros((full_h, full_w, 1), dtype=np.float32)
+    fg_full = np.zeros((full_h, full_w, 3), dtype=np.float32)
+
+    alpha_full[y_start:y_end, x_start:x_end, :] = alpha_crop
+    fg_full[y_start:y_end, x_start:x_end, :] = fg_crop
+
+    return {
+        "alpha_final": mx.array(alpha_full)[None],  # (1, H, W, 1)
+        "fg_final": mx.array(fg_full)[None],  # (1, H, W, 3)
+    }
+
+
+# Margin around subject bbox (pixels) — prevents edge clipping artifacts
+SINGLE_TILE_MARGIN = 64
+
+
 def tiled_inference(
     model: GreenFormer,
     x: mx.array,
@@ -96,6 +188,9 @@ def tiled_inference(
     overlap: int = DEFAULT_OVERLAP,
 ) -> dict[str, mx.array]:
     """Run model on overlapping tiles and blend the results.
+
+    If the subject (non-zero alpha hint) fits within a single tile_size x tile_size
+    region, runs a single inference instead of the full tiling grid.
 
     Args:
         model: Loaded GreenFormer (must accept tile_size x tile_size input).
@@ -115,6 +210,19 @@ def tiled_inference(
     # If image fits in one tile, just run normally
     if full_h <= tile_size and full_w <= tile_size:
         return model(x)
+
+    # Dynamic single-tile: if subject bbox fits in one tile, skip full grid
+    bbox = _find_subject_bbox(x[0, :, :, 3], margin=SINGLE_TILE_MARGIN)
+    if bbox is not None:
+        y_start, y_end, x_start, x_end = bbox
+        bbox_h = y_end - y_start
+        bbox_w = x_end - x_start
+        if bbox_h <= tile_size and bbox_w <= tile_size:
+            logger.info(
+                "Single-tile shortcut: subject bbox %dx%d fits in %dx%d tile",
+                bbox_w, bbox_h, tile_size, tile_size,
+            )
+            return _single_tile_inference(model, x, bbox, tile_size)
 
     y_coords = _compute_tile_coords(full_h, tile_size, overlap)
     x_coords = _compute_tile_coords(full_w, tile_size, overlap)
@@ -186,7 +294,8 @@ def tiled_inference(
             del alpha_tile, fg_tile, w, w3d
 
     if tiles_skipped > 0:
-        logger.debug("Tiles skipped: %d/%d (%.0f%%)", tiles_skipped, tiles_total, 100.0 * tiles_skipped / tiles_total)
+        skip_pct = 100.0 * tiles_skipped / tiles_total
+        logger.debug("Tiles skipped: %d/%d (%.0f%%)", tiles_skipped, tiles_total, skip_pct)
 
     # Normalize by accumulated weights
     weight_accum = np.maximum(weight_accum, 1e-8)
