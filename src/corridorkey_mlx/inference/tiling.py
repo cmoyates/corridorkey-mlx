@@ -258,7 +258,7 @@ def tiled_inference(
                 fg_tile = np.array(mx.sigmoid(x[0, y_start:y_end, x_start:x_end, :3]))
                 tiles_skipped += 1
             else:
-                # Mixed content — run full inference
+                # Mixed content — granular per-component inference
                 tile = x[:, y_start:y_end, x_start:x_end, :]
 
                 # Pad to tile_size if needed (edge tiles may be smaller)
@@ -267,8 +267,17 @@ def tiled_inference(
                 if pad_h > 0 or pad_w > 0:
                     tile = mx.pad(tile, [(0, 0), (0, pad_h), (0, pad_w), (0, 0)])
 
-                out = model(tile)
-                mx.eval(out)  # materialize before np.array conversion  # noqa: S307
+                # Per-component eval allows MLX memory pool to recycle
+                # backbone buffers before refiner im2col allocation.
+                features = model.run_backbone(tile)
+                # NOTE: mx.eval is MLX array materialization, not Python eval()
+                mx.eval(*features)  # noqa: S307
+                coarse = model.run_decoders(features)
+                mx.eval(coarse["alpha_coarse"], coarse["fg_coarse"])  # noqa: S307
+                del features
+                out = model.run_refiner(tile, coarse)
+                mx.eval(out)  # noqa: S307
+                del coarse
                 alpha_tile = np.array(out["alpha_final"][0])
                 fg_tile = np.array(out["fg_final"][0])
 

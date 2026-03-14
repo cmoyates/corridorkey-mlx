@@ -18,6 +18,28 @@ REFINER_GROUPS = 8
 REFINER_SCALE = 10.0
 
 
+def _pixel_unshuffle_nhwc(x: mx.array, d: int) -> mx.array:
+    """Space-to-depth for NHWC: (B,H,W,C) → (B,H//d,W//d,C*d²).
+
+    Packs spatially distant pixels into contiguous channels so that a
+    subsequent grouped conv can replace a dilated conv with contiguous
+    memory access patterns.
+    """
+    B, H, W, C = x.shape
+    x = x.reshape(B, H // d, d, W // d, d, C)
+    x = x.transpose(0, 1, 3, 2, 4, 5)  # (B, H//d, W//d, d, d, C)
+    return x.reshape(B, H // d, W // d, d * d * C)
+
+
+def _pixel_shuffle_nhwc(x: mx.array, d: int) -> mx.array:
+    """Depth-to-space for NHWC: (B,H//d,W//d,C*d²) → (B,H,W,C)."""
+    B, Hd, Wd, Cdd = x.shape
+    C = Cdd // (d * d)
+    x = x.reshape(B, Hd, Wd, d, d, C)
+    x = x.transpose(0, 1, 3, 2, 4, 5)  # (B, Hd, d, Wd, d, C)
+    return x.reshape(B, Hd * d, Wd * d, C)
+
+
 class FrozenGroupNorm(nn.Module):
     """GroupNorm with frozen-stats support for tiled inference.
 
@@ -65,10 +87,16 @@ class FrozenGroupNorm(nn.Module):
 
 
 class RefinerBlock(nn.Module):
-    """Dilated residual block with GroupNorm (NHWC)."""
+    """Dilated residual block with GroupNorm (NHWC).
+
+    Supports optional Space-to-Depth (SPD) mode for dilated convolutions.
+    SPD replaces scattered dilated memory access with contiguous grouped
+    conv, improving cache utilization on Apple Silicon.
+    """
 
     def __init__(self, channels: int, dilation: int) -> None:
         super().__init__()
+        self.dilation = dilation
         self.conv1 = nn.Conv2d(
             channels,
             channels,
@@ -85,11 +113,60 @@ class RefinerBlock(nn.Module):
             dilation=dilation,
         )
         self.gn2 = FrozenGroupNorm(REFINER_GROUPS, channels)
+        # SPD conv replacements (populated by prepare_spd)
+        self._use_spd = False
+        self._spd_conv1: nn.Conv2d | None = None
+        self._spd_conv2: nn.Conv2d | None = None
+
+    def prepare_spd(self) -> None:
+        """Convert dilated convs to SPD + grouped standard conv.
+
+        Mathematically lossless: dilated conv with dilation=d is equivalent
+        to pixel_unshuffle(d) -> grouped conv(groups=d^2) -> pixel_shuffle(d).
+        Weights are tiled d^2 times to replicate the same kernel per sub-image.
+        """
+        d = self.dilation
+        if d <= 1:
+            return
+        d2 = d * d
+        C = self.conv1.weight.shape[0]  # REFINER_CHANNELS
+
+        # Create grouped conv layers (standard 3x3, no dilation)
+        self._spd_conv1 = nn.Conv2d(
+            C * d2, C * d2, kernel_size=3, padding=1, groups=d2, bias=True,
+        )
+        self._spd_conv2 = nn.Conv2d(
+            C * d2, C * d2, kernel_size=3, padding=1, groups=d2, bias=True,
+        )
+
+        # Tile weights: each of d^2 groups uses identical original weights
+        self._spd_conv1.weight = mx.tile(self.conv1.weight, (d2, 1, 1, 1))
+        self._spd_conv1.bias = mx.tile(self.conv1.bias, (d2,))
+        self._spd_conv2.weight = mx.tile(self.conv2.weight, (d2, 1, 1, 1))
+        self._spd_conv2.bias = mx.tile(self.conv2.bias, (d2,))
+
+        # Materialize tiled weights — mx.eval is MLX array materialization
+        mx.eval(self._spd_conv1.weight, self._spd_conv1.bias,  # noqa: S307
+                self._spd_conv2.weight, self._spd_conv2.bias)
+        self._use_spd = True
 
     def __call__(self, x: mx.array) -> mx.array:
         residual = x
-        out = nn.relu(self.gn1(self.conv1(x)))
-        out = self.gn2(self.conv2(out))
+        if self._use_spd:
+            d = self.dilation
+            # Conv1: unshuffle -> grouped conv -> shuffle -> GroupNorm -> ReLU
+            out = _pixel_unshuffle_nhwc(x, d)
+            out = self._spd_conv1(out)
+            out = _pixel_shuffle_nhwc(out, d)
+            out = nn.relu(self.gn1(out))
+            # Conv2: unshuffle -> grouped conv -> shuffle -> GroupNorm
+            out = _pixel_unshuffle_nhwc(out, d)
+            out = self._spd_conv2(out)
+            out = _pixel_shuffle_nhwc(out, d)
+            out = self.gn2(out)
+        else:
+            out = nn.relu(self.gn1(self.conv1(x)))
+            out = self.gn2(self.conv2(out))
         return nn.relu(out + residual)
 
 
@@ -176,15 +253,22 @@ class CNNRefinerModule(nn.Module):
             gn._frozen_stats = None
             gn._collected_stats = None
 
-    def prepare_inference(self) -> None:
-        """Precompute 2D weight for 1x1 final conv to bypass mx.conv2d dispatch.
+    def prepare_inference(self, use_spd: bool = False) -> None:
+        """Precompute optimized weights for inference.
 
-        Uses mx.addmm for fused bias+matmul. Call after weights are loaded.
+        - 1x1 final conv -> addmm bypass
+        - Dilated convs -> SPD grouped conv (if use_spd=True)
         """
         c_out, _, _, c_in = self.final.weight.shape
         self._final_weight_2d = self.final.weight.reshape(c_out, c_in)
         # materialize reshaped weight — mx.eval is MLX array materialization
         mx.eval(self._final_weight_2d)  # noqa: S307
+
+        # Convert dilated convs to SPD + grouped conv for contiguous access
+        if use_spd:
+            self.res2.prepare_spd()  # dilation=2
+            self.res3.prepare_spd()  # dilation=4
+            self.res4.prepare_spd()  # dilation=8
 
     def __call__(self, rgb: mx.array, coarse_pred: mx.array) -> mx.array:
         """Forward pass.
