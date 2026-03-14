@@ -117,6 +117,7 @@ class CorridorKeyMLXEngine:
                 checkpoint, img_size=self._tile_size, compile=compile, slim=True,
                 backbone_size=backbone_size,
                 refiner_dtype=mx.float16,
+                stage_gc=False,
             )
             logger.info(
                 "Tiled inference: tile_size=%d, overlap=%d", self._tile_size, self._overlap

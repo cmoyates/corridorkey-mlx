@@ -160,8 +160,7 @@ def tiled_inference(
                     tile = mx.pad(tile, [(0, 0), (0, pad_h), (0, pad_w), (0, 0)])
 
                 out = model(tile)
-                mx.eval(out)  # materialize MLX arrays  # noqa: S307
-
+                mx.eval(out)  # materialize before np.array conversion  # noqa: S307
                 alpha_tile = np.array(out["alpha_final"][0])
                 fg_tile = np.array(out["fg_final"][0])
 
@@ -183,10 +182,8 @@ def tiled_inference(
             fg_accum[y_start:y_end, x_start:x_end, :] += fg_tile * w3d
             weight_accum[y_start:y_end, x_start:x_end, :] += w3d
 
-            # Deterministic memory cleanup — release MLX graph refs between tiles
+            # Lightweight cleanup — delete refs but skip expensive gc/cache flush
             del alpha_tile, fg_tile, w, w3d
-            gc.collect()
-            mx.clear_cache()
 
     if tiles_skipped > 0:
         logger.debug("Tiles skipped: %d/%d (%.0f%%)", tiles_skipped, tiles_total, 100.0 * tiles_skipped / tiles_total)
